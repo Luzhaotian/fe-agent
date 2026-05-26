@@ -113,6 +113,137 @@ fe-agent knowledge -s "组件"
 fe-agent status
 ```
 
+## 📖 使用示例
+
+### 示例 1：开发一个 Todo 列表页面
+
+**步骤 1：初始化配置**（仅首次）
+
+```bash
+fe-agent init
+# 按提示输入 API Key，例如：
+#   LLM_API_KEY: sk-xxxxx
+#   LLM_BASE_URL: https://api.openai.com/v1
+#   LLM_MODEL: gpt-4o
+#   项目名称: my-todo-app
+```
+
+**步骤 2：启动智能体**
+
+```bash
+fe-agent start -r "开发一个 Todo 列表页面，支持添加、删除、标记完成功能"
+```
+
+**步骤 3：观察运行过程**
+
+智能体会自动启动多角色协作：
+
+```
+🚀 前端智能体启动
+项目: my-todo-app
+
+── 项目经理 → 产品 [task] ──
+收到需求，开始分析...
+分发给产品角色进行需求整理
+
+── 产品 → 项目经理 [result] ──
+## 需求概述
+开发一个 Todo 列表页面...
+
+## 功能列表
+1. 添加 Todo
+   - 描述：用户输入框 + 添加按钮
+   - 验收标准：能成功添加新项
+2. 删除 Todo
+   ...
+```
+
+**期间可能会向你提问**（高级问题）：
+```
+❓ 需要您确认：
+数据是否需要后端持久化？还是仅前端存储？
+请输入您的回复: 仅前端 localStorage 存储
+```
+
+**步骤 4：查看结果日志**
+
+```bash
+# 查看所有角色日志
+fe-agent logs
+
+# 只看前端架构师生成代码的日志
+fe-agent logs -r architect
+```
+
+---
+
+### 示例 2：从文件读取需求
+
+```bash
+# 先写一个需求文件
+cat > requirements.md << 'EOF'
+# 用户管理模块需求
+
+## 功能
+1. 用户列表展示（分页、搜索）
+2. 新增/编辑用户弹窗
+3. 删除用户确认
+
+## 技术要求
+- 使用 React + TypeScript
+- 组件使用 antd
+EOF
+
+# 传入文件启动
+fe-agent start -f requirements.md
+```
+
+---
+
+### 示例 3：访问网页分析需求
+
+```bash
+fe-agent start -u https://www.example.com/feature-page
+# 产品角色会自动访问网页提取需求
+# 如需登录，会提示你登录后继续
+```
+
+---
+
+### 示例 4：查看知识库积累
+
+```bash
+# 经过几次使用后，查看积累的知识
+fe-agent knowledge
+
+# 搜索特定关键词
+fe-agent knowledge -s "组件复用"
+fe-agent knowledge -r architect
+```
+
+---
+
+### 示例 5：在现有项目中测试
+
+```bash
+cd your-existing-project
+
+# 初始化（会在当前目录创建 .env）
+fe-agent init
+
+# 启动，智能体会自动分析你的项目结构
+fe-agent start -r "在用户列表页添加批量删除功能"
+```
+
+智能体会：
+1. 自动扫描项目目录结构
+2. 识别已有的通用组件
+3. 按项目已有的代码风格生成代码
+4. 生成对应测试用例
+5. 审查代码和用例
+
+---
+
 ## 🔄 工作流程
 
 ```
