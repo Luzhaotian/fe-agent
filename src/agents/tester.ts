@@ -1,16 +1,19 @@
 import { BaseAgent } from './base';
-import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
-import { Logger, KnowledgeBase } from '../utils/file';
+import { ProjectConfig, Role, AgentMessage, MessageType, WorkScope } from '../types';
+import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
 
 export class TesterAgent extends BaseAgent {
+  private artifacts: Artifacts;
+
   constructor(config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
     super(Role.TESTER, config, logger, knowledge);
+    this.artifacts = new Artifacts(config.project.path);
   }
 
   getSystemPrompt(): string {
     return `你是一个测试员角色，你的职责是：
 
-1. 编写测试用例，根据用例执行
+1. 编写测试用例（先后端接口用例，再前端交互用例，由任务 scope 指定）
 2. 写好的用例交给项目经理，由项目经理分发给审查员进行审查
 
 测试用例格式：
@@ -47,28 +50,40 @@ export class TesterAgent extends BaseAgent {
   }
 
   private async handleWriteTestCase(message: AgentMessage): Promise<AgentMessage[]> {
-    this.log('write_testcase', '开始编写测试用例');
+    const scope = ((message.metadata?.scope as WorkScope) || 'frontend') as WorkScope;
+    const side = scope === 'backend' ? '后端' : '前端';
+    this.log('write_testcase', `开始编写${side}测试用例`);
+
+    const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
+
+    const focus =
+      scope === 'backend'
+        ? '重点覆盖接口路径、入参校验、响应与错误码、鉴权与边界条件'
+        : '重点覆盖页面交互、前后端联调调用、异常提示与边界条件';
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `请根据以下需求编写完整的测试用例：\n\n${message.content}\n\n要求：
-1. 覆盖所有功能点
+      `请根据以下内容编写完整的${side}测试用例：\n\n${message.content}\n\n## 接口文档\n${apiDoc || '无'}\n\n要求：
+1. 覆盖所有相关功能点
 2. 包含正常流程和异常流程
 3. 考虑边界条件
 4. 每个用例有明确的预期结果
-5. 标注优先级`
+5. 标注优先级
+6. ${focus}`
     );
 
-    this.log('testcase_written', '测试用例编写完成');
+    this.log('testcase_written', `${side}测试用例编写完成`);
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
         testCasesDelivered: true,
+        scope,
       }),
     ];
   }
 
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
+    const scope = ((message.metadata?.scope as WorkScope) || 'frontend') as WorkScope;
     this.log('handle_review', '处理审查反馈，整改测试用例');
 
     const response = await this.askLLM(
@@ -81,6 +96,7 @@ export class TesterAgent extends BaseAgent {
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
         testCasesRevised: true,
+        scope,
       }),
     ];
   }

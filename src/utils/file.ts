@@ -187,3 +187,30 @@ export function listFiles(dirPath: string, pattern?: RegExp): string[] {
 export function fileExists(filePath: string): boolean {
   return fs.existsSync(filePath);
 }
+
+// ============ 产物系统 ============
+
+export class Artifacts {
+  private projectPath: string;
+
+  constructor(projectPath: string) {
+    this.projectPath = projectPath;
+    ensureDir(path.join(getAgentDir(projectPath), 'artifacts'));
+  }
+
+  private getArtifactsDir(): string {
+    return path.join(getAgentDir(this.projectPath), 'artifacts');
+  }
+
+  getApiDocPath(): string {
+    return path.join(this.getArtifactsDir(), 'api-doc.md');
+  }
+
+  saveApiDoc(content: string): void {
+    writeFile(this.getApiDocPath(), content);
+  }
+
+  readApiDoc(): string | null {
+    return readFile(this.getApiDocPath());
+  }
+}

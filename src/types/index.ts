@@ -2,6 +2,8 @@
 export enum Role {
   MANAGER = 'manager',
   PRODUCT = 'product',
+  ARCHITECT_SYS = 'architect_sys',
+  BACKEND = 'backend',
   ARCHITECT = 'architect',
   TESTER = 'tester',
   REVIEWER = 'reviewer',
@@ -11,6 +13,8 @@ export enum Role {
 export const RoleName: Record<Role, string> = {
   [Role.MANAGER]: '项目经理',
   [Role.PRODUCT]: '产品',
+  [Role.ARCHITECT_SYS]: '架构',
+  [Role.BACKEND]: '后端架构',
   [Role.ARCHITECT]: '前端架构',
   [Role.TESTER]: '测试员',
   [Role.REVIEWER]: '审查员',
@@ -37,12 +41,20 @@ export enum WorkflowStage {
   REQUIREMENT_INPUT = 'requirement_input',
   PRODUCT_ORGANIZE = 'product_organize',
   REVIEW_REQUIREMENT = 'review_requirement',
-  DEVELOP_CODE = 'develop_code',
-  WRITE_TEST = 'write_test',
-  REVIEW_CODE_AND_TEST = 'review_code_and_test',
+  ARCH_EVALUATE = 'arch_evaluate',
+  REVIEW_API_DOC = 'review_api_doc',
+  DEVELOP_BACKEND = 'develop_backend',
+  WRITE_BACKEND_TEST = 'write_backend_test',
+  REVIEW_BACKEND = 'review_backend',
+  DEVELOP_FRONTEND = 'develop_frontend',
+  WRITE_FRONTEND_TEST = 'write_frontend_test',
+  REVIEW_FRONTEND = 'review_frontend',
   FIX_ISSUES = 'fix_issues',
   COMPLETE = 'complete',
 }
+
+export type ReviewType = 'requirement' | 'api_doc' | 'code' | 'test';
+export type WorkScope = 'backend' | 'frontend' | 'infra';
 
 // Agent 消息
 export interface AgentMessage {
@@ -146,9 +158,12 @@ export interface ProjectConfig {
 export interface WorkflowState {
   stage: WorkflowStage;
   requirement?: Requirement;
-  codeArtifacts: CodeArtifact[];
+  apiDoc?: string;
+  backendArtifacts: CodeArtifact[];
+  frontendArtifacts: CodeArtifact[];
   testCases: TestCase[];
   reviewFeedbacks: ReviewFeedback[];
   pendingQuestions: AgentMessage[];
   history: AgentMessage[];
+  skipBackend?: boolean;
 }

@@ -156,7 +156,7 @@ LLM_MODEL=${answers.model}
 program
   .command('logs')
   .description('查看角色日志')
-  .option('-r, --role <role>', '查看指定角色日志 (manager/product/architect/tester/reviewer)')
+  .option('-r, --role <role>', '查看指定角色日志 (manager/product/architect_sys/backend/architect/tester/reviewer)')
   .option('-d, --date <date>', '查看指定日期日志 (YYYY-MM-DD)')
   .action((options) => {
     const projectPath = process.cwd();
@@ -204,7 +204,7 @@ program
       entries.forEach((e) => console.log(`- [${e.category}] ${e.content} (来源: ${e.source})`));
     } else {
       console.log(chalk.cyan('\n📚 所有知识库：\n'));
-      for (const role of ['manager', 'product', 'architect', 'tester', 'reviewer']) {
+      for (const role of ['manager', 'product', 'architect_sys', 'backend', 'architect', 'tester', 'reviewer']) {
         const entries = knowledge.getEntries(role as any);
         if (entries.length > 0) {
           console.log(chalk.yellow(`\n--- ${role} (${entries.length}条) ---`));
@@ -230,7 +230,7 @@ program
     }
 
     // 检查各目录
-    const dirs = ['logs', 'knowledge', 'skills'];
+    const dirs = ['logs', 'knowledge', 'skills', 'artifacts'];
     for (const dir of dirs) {
       const dirPath = path.join(agentDir, dir);
       if (fs.existsSync(dirPath)) {

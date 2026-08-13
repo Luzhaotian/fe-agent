@@ -2,23 +2,26 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { BaseAgent } from './base';
 import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
-import { Logger, KnowledgeBase, listFiles, readFile, fileExists } from '../utils/file';
+import { Logger, KnowledgeBase, Artifacts, listFiles, readFile, fileExists } from '../utils/file';
 
 export class ArchitectAgent extends BaseAgent {
+  private artifacts: Artifacts;
   private projectStructure: string = '';
   private existingComponents: string = '';
 
   constructor(config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
     super(Role.ARCHITECT, config, logger, knowledge);
+    this.artifacts = new Artifacts(config.project.path);
   }
 
   getSystemPrompt(): string {
     return `你是一个前端架构角色，你的职责是：
 
 1. 把产品整理好的需求按照需求进行代码开发，开发完成后发给项目经理，由项目经理分发给审查员审查
-2. 在任何项目中，先查看是否有根据项目习惯、框架、语言生成的 skills
-3. 如果没有 skills，先根据项目生成一个 skills，这个 skills 要求按照项目架构生成，查看项目的构成，是否有通用组件，生成的代码优先使用通用组件。严格按照项目语言开发
-4. 不得自己设计样式和结构，严格按照项目已有的结构来，优先参考已写好的页面或者功能
+2. 必须依据已审核的接口文档对接后端（路径、入参、出参、错误码）
+3. 在任何项目中，先查看是否有根据项目习惯、框架、语言生成的 skills
+4. 如果没有 skills，先根据项目生成一个 skills，查看项目构成与通用组件，生成的代码优先使用通用组件。严格按照项目语言开发
+5. 不得自己设计样式和结构，严格按照项目已有的结构来，优先参考已写好的页面或者功能
 
 代码输出格式：
 \`\`\`language:filepath
@@ -26,6 +29,7 @@ export class ArchitectAgent extends BaseAgent {
 \`\`\`
 
 每个文件用一个代码块输出，并说明文件路径。
+若发现需要改基建/目录/依赖等非业务内容，在回复中标注 [NEEDS_ARCHITECT_SYS] 并说明原因。
 
 请用中文注释和回复。`;
   }
@@ -134,9 +138,11 @@ export class ArchitectAgent extends BaseAgent {
       skillsContent = await this.generateSkills();
     }
 
+    const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
+
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `请根据以下需求开发前端代码：
+      `请根据以下需求与接口文档开发前端代码：
 
 ## 项目结构
 ${this.projectStructure}
@@ -147,6 +153,9 @@ ${this.existingComponents || '未找到通用组件'}
 ## 项目 Skills
 ${skillsContent || '暂无'}
 
+## 接口文档
+${apiDoc || '无（纯前端或未提供）'}
+
 ## 需求
 ${message.content}
 
@@ -154,8 +163,9 @@ ${message.content}
 1. 严格按照项目已有的结构来写代码
 2. 优先使用已有通用组件
 3. 参考已有页面或功能的写法
-4. 每个文件用代码块输出，标注文件路径
-5. 按照项目使用的语言和框架编写`
+4. 对接接口文档中的契约
+5. 每个文件用代码块输出，标注文件路径
+6. 按照项目使用的语言和框架编写`
     );
 
     this.log('develop_complete', '代码开发完成');
@@ -163,6 +173,8 @@ ${message.content}
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
         codeDelivered: true,
+        scope: 'frontend',
+        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
       }),
     ];
   }
@@ -182,6 +194,8 @@ ${message.content}
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
         codeRevised: true,
+        scope: 'frontend',
+        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
       }),
     ];
   }
