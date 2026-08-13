@@ -64,15 +64,13 @@ User requirement
   → Reviewer reviews frontend code + frontend tests
        ▼
   → Complete
+```
 
 Anytime a role detects a non-business change:
-  → Manager routes to Architect_sys → after fix, resume prior stage
 
-Signal for non-business work: agent messages may set `metadata.needsArchitectSys = true`
-(or Manager LLM output uses `[DISPATCH:architect_sys]`). After architect_sys returns
-RESULT, Manager continues the interrupted stage (backend/frontend/test/review) with
-prior context preserved in `WorkflowState.history`.
-```
+- Manager routes to `architect_sys`; after fix, resume prior stage.
+- Signal: message `metadata.needsArchitectSys = true`, or Manager LLM output `[DISPATCH:architect_sys]`.
+- After `architect_sys` returns `RESULT`, Manager continues the interrupted stage using context in `WorkflowState.history`.
 
 ### Stage enum (extended)
 
