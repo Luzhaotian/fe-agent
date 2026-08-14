@@ -136,20 +136,6 @@ export class KnowledgeBase {
     const filePath = this.getKnowledgeFilePath(role);
     fs.writeFileSync(filePath, JSON.stringify(entries, null, 2), 'utf-8');
   }
-
-  // 分析日志并提取知识点
-  extractFromLog(role: Role, logContent: string): string[] {
-    const newKnowledge: string[] = [];
-    // 简单规则：提取包含"发现"、"学到"、"注意"、"经验"等关键词的日志
-    const patterns = [/发现[:：](.+)/, /学到[:：](.+)/, /注意[:：](.+)/, /经验[:：](.+)/, /新知识[:：](.+)/];
-    for (const pattern of patterns) {
-      const match = logContent.match(pattern);
-      if (match) {
-        newKnowledge.push(match[1].trim());
-      }
-    }
-    return newKnowledge;
-  }
 }
 
 // ============ 文件工具 ============

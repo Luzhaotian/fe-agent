@@ -10,9 +10,10 @@ import {
   WorkScope,
 } from '../types';
 import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
+import { resolveReviewTarget } from '../utils/review-target';
 
 /**
- * 项目经理：统筹分发。维护关卡状态，保证：
+ * 项目经理：统筹分发。关卡：
  * 需求审过 → 架构评估+接口文档 → 轻量审文档 → 后端(+用例) → 前端(+用例)
  */
 export class ManagerAgent extends BaseAgent {
@@ -34,19 +35,14 @@ export class ManagerAgent extends BaseAgent {
   }
 
   getSystemPrompt(): string {
-    return `你是一个项目经理（统筹员）角色，你的职责是：
+    return `你是项目经理，负责统筹分发与问题分级：
 
-1. 接收需求并分发给产品角色
-2. 需求审查通过后分发给系统架构角色做评估并产出接口文档
-3. 接口文档轻量审查通过后：先分发后端架构与测试员（后端用例）；后端通过后再分发前端架构与测试员（前端用例）
-4. 收集提问并分级：低级自己处理，中级查知识库，高级交用户
-5. 若消息标记需要系统架构介入非业务改动，分发给架构角色
+1. 新需求先交产品整理，再送审查
+2. 需求通过后交架构评估并产出接口文档；文档轻量审过后先进后端（可跳过），再进前端
+3. 低级问题自行处理，中级查知识库，高级交用户决策
+4. 非业务/基建改动转交架构角色
 
-输出可用标记：
-- [QUESTION:level] level 为 low/medium/high
-- [DISPATCH:role] role 为 product/architect_sys/backend/architect/tester/reviewer
-- [REVIEW:type] type 为 requirement/api_doc/code/test
-- [CONCLUSION]
+实际分发由程序按关卡执行；你的回复用于分析与建议用户决策。
 
 请用中文回复。`;
   }
@@ -73,14 +69,13 @@ export class ManagerAgent extends BaseAgent {
   }
 
   private async handleNewRequirement(message: AgentMessage): Promise<AgentMessage[]> {
-    // 用户回答后的继续任务：可能仍指向经理自己
     if (message.metadata?.resumeAfterUser) {
       return this.handleResult(message);
     }
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `用户提出了新需求：\n${message.content}\n\n请分析此需求，决定下一步操作。如果需求不清晰，列出需要向用户确认的问题。`
+      `用户提出了新需求：\n${message.content}\n\n请分析此需求。如果需求不清晰，列出需要向用户确认的问题。`
     );
 
     this.requirementContent = message.content;
@@ -88,10 +83,12 @@ export class ManagerAgent extends BaseAgent {
     this.log('dispatch', '将需求分发给产品角色进行整理');
 
     return [
-      this.createMessage(Role.PRODUCT, MessageType.TASK, `请整理以下需求：\n${message.content}\n\n项目经理分析：${response}`, {
-        originalRequirement: message.content,
-        managerAnalysis: response,
-      }),
+      this.createMessage(
+        Role.PRODUCT,
+        MessageType.TASK,
+        `请整理以下需求：\n${message.content}\n\n项目经理分析：${response}`,
+        { originalRequirement: message.content, managerAnalysis: response }
+      ),
     ];
   }
 
@@ -106,10 +103,6 @@ export class ManagerAgent extends BaseAgent {
   }
 
   private async handleResult(message: AgentMessage): Promise<AgentMessage[]> {
-    if (message.metadata?.needsArchitectSys && message.from !== Role.ARCHITECT_SYS) {
-      return this.routeToArchitectSys(message);
-    }
-
     if (message.from === Role.PRODUCT) {
       this.requirementContent = message.content;
       this.log('dispatch', '将产品需求发给审查员审查');
@@ -128,7 +121,8 @@ export class ManagerAgent extends BaseAgent {
         return this.handleResult(resume);
       }
 
-      this.apiDocContent = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || message.content;
+      this.apiDocContent =
+        (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || message.content;
       this.skipBackend = Boolean(message.metadata?.skipBackend);
       this.log('dispatch', '将接口文档发给审查员轻量审查');
       return [
@@ -178,11 +172,9 @@ export class ManagerAgent extends BaseAgent {
   private isReviewPassed(message: AgentMessage, feedbacks: ReviewFeedback[]): boolean {
     const highest = (message.metadata?.highestLevel as IssueLevel) || IssueLevel.LOW;
     if (highest === IssueLevel.HIGH || highest === IssueLevel.MEDIUM) return false;
-    // 仅低级：若明确是“通过”或无真实问题描述，视为通过
     const text = message.content;
     if (/审查通过|无严重问题|可以继续|无问题/.test(text)) return true;
     if (feedbacks.length === 1 && feedbacks[0].content.includes('审查通过')) return true;
-    // 有低级优化建议也允许继续，避免卡住流水线
     return highest === IssueLevel.LOW;
   }
 
@@ -204,27 +196,30 @@ export class ManagerAgent extends BaseAgent {
         `收到高级审查反馈：\n${message.content}\n\n请给出给用户的决策建议。`
       );
       return [
-        this.createMessage(Role.MANAGER, MessageType.QUESTION, `需要用户决定的审查反馈：\n${message.content}\n\n项目经理建议：${response}`, {
-          level: IssueLevel.HIGH,
-          needsUserDecision: true,
-          reviewType,
-          scope,
-        }),
+        this.createMessage(
+          Role.MANAGER,
+          MessageType.QUESTION,
+          `需要用户决定的审查反馈：\n${message.content}\n\n项目经理建议：${response}`,
+          { level: IssueLevel.HIGH, needsUserDecision: true, reviewType, scope }
+        ),
       ];
     }
 
-    // 中/低但未通过：分发整改
-    const targetRole = this.resolveFixTarget(reviewType, scope, feedbacks);
+    const targetRole =
+      feedbacks[0]?.targetRole && Object.values(Role).includes(feedbacks[0].targetRole)
+        ? feedbacks[0].targetRole
+        : resolveReviewTarget(reviewType, scope);
+
     if (highest === IssueLevel.MEDIUM) {
       const pastKnowledge = this.knowledge.searchEntries(this.role, message.content.slice(0, 50));
       if (pastKnowledge.length === 0) {
         return [
-          this.createMessage(Role.MANAGER, MessageType.QUESTION, `中级审查反馈，无历史记录，需要确认：\n${message.content}`, {
-            level: IssueLevel.MEDIUM,
-            needsUserDecision: true,
-            reviewType,
-            scope,
-          }),
+          this.createMessage(
+            Role.MANAGER,
+            MessageType.QUESTION,
+            `中级审查反馈，无历史记录，需要确认：\n${message.content}`,
+            { level: IssueLevel.MEDIUM, needsUserDecision: true, reviewType, scope }
+          ),
         ];
       }
       this.log('knowledge_lookup', '从知识库中找到相关历史记录');
@@ -248,24 +243,6 @@ export class ManagerAgent extends BaseAgent {
     ];
   }
 
-  private resolveFixTarget(reviewType: ReviewType, scope: WorkScope | undefined, feedbacks: ReviewFeedback[]): Role {
-    if (feedbacks[0]?.targetRole && Object.values(Role).includes(feedbacks[0].targetRole)) {
-      return feedbacks[0].targetRole;
-    }
-    switch (reviewType) {
-      case 'requirement':
-        return Role.PRODUCT;
-      case 'api_doc':
-        return Role.ARCHITECT_SYS;
-      case 'test':
-        return Role.TESTER;
-      case 'code':
-        return scope === 'backend' ? Role.BACKEND : Role.ARCHITECT;
-      default:
-        return Role.ARCHITECT;
-    }
-  }
-
   private advanceAfterApprovedReview(reviewType: ReviewType, scope?: WorkScope): AgentMessage[] {
     if (reviewType === 'requirement') {
       this.log('dispatch', '需求审查通过，分发给系统架构评估并产出接口文档');
@@ -282,10 +259,10 @@ export class ManagerAgent extends BaseAgent {
       this.apiDocContent = this.artifacts.readApiDoc() || this.apiDocContent;
       if (this.skipBackend) {
         this.log('dispatch', '接口文档确认无需后端，跳过后端阶段，进入前端');
-        return this.dispatchFrontend();
+        return this.dispatchSide('frontend');
       }
       this.log('dispatch', '接口文档审查通过，分发后端开发与后端测试');
-      return this.dispatchBackend();
+      return this.dispatchSide('backend');
     }
 
     if (reviewType === 'code' && scope === 'backend') {
@@ -298,22 +275,12 @@ export class ManagerAgent extends BaseAgent {
       return this.maybeDispatchFrontend();
     }
 
-    if (reviewType === 'code' && scope === 'frontend') {
+    if (reviewType === 'code' && (scope === 'frontend' || !scope)) {
       this.frontendCodeApproved = true;
       return this.maybeComplete();
     }
 
-    if (reviewType === 'test' && scope === 'frontend') {
-      this.frontendTestApproved = true;
-      return this.maybeComplete();
-    }
-
-    // 兼容未带 scope 的旧审查：按前端处理
-    if (reviewType === 'code') {
-      this.frontendCodeApproved = true;
-      return this.maybeComplete();
-    }
-    if (reviewType === 'test') {
+    if (reviewType === 'test' && (scope === 'frontend' || !scope)) {
       this.frontendTestApproved = true;
       return this.maybeComplete();
     }
@@ -321,20 +288,23 @@ export class ManagerAgent extends BaseAgent {
     return [];
   }
 
-  private dispatchBackend(): AgentMessage[] {
+  private dispatchSide(scope: WorkScope): AgentMessage[] {
     const apiDoc = this.apiDocContent || this.artifacts.readApiDoc() || '';
+    const side = scope === 'backend' ? '后端' : '前端';
+    const devRole = scope === 'backend' ? Role.BACKEND : Role.ARCHITECT;
+
     return [
       this.createMessage(
-        Role.BACKEND,
+        devRole,
         MessageType.TASK,
-        `请根据以下需求与接口文档开发后端代码：\n\n## 需求\n${this.requirementContent}\n\n## 接口文档\n${apiDoc}`,
-        { apiDoc, scope: 'backend' satisfies WorkScope }
+        `请根据以下需求与接口文档开发${side}代码：\n\n## 需求\n${this.requirementContent}\n\n## 接口文档\n${apiDoc}`,
+        { apiDoc, scope }
       ),
       this.createMessage(
         Role.TESTER,
         MessageType.TASK,
-        `请根据以下需求与接口文档编写后端测试用例：\n\n## 需求\n${this.requirementContent}\n\n## 接口文档\n${apiDoc}`,
-        { apiDoc, scope: 'backend' satisfies WorkScope }
+        `请根据以下需求与接口文档编写${side}测试用例：\n\n## 需求\n${this.requirementContent}\n\n## 接口文档\n${apiDoc}`,
+        { apiDoc, scope }
       ),
     ];
   }
@@ -345,25 +315,7 @@ export class ManagerAgent extends BaseAgent {
       return [];
     }
     this.log('dispatch', '后端关卡通过，分发前端开发与前端测试');
-    return this.dispatchFrontend();
-  }
-
-  private dispatchFrontend(): AgentMessage[] {
-    const apiDoc = this.apiDocContent || this.artifacts.readApiDoc() || '';
-    return [
-      this.createMessage(
-        Role.ARCHITECT,
-        MessageType.TASK,
-        `请根据以下需求与接口文档开发前端代码：\n\n## 需求\n${this.requirementContent}\n\n## 接口文档\n${apiDoc}`,
-        { apiDoc, scope: 'frontend' satisfies WorkScope }
-      ),
-      this.createMessage(
-        Role.TESTER,
-        MessageType.TASK,
-        `请根据以下需求与接口文档编写前端测试用例：\n\n## 需求\n${this.requirementContent}\n\n## 接口文档\n${apiDoc}`,
-        { apiDoc, scope: 'frontend' satisfies WorkScope }
-      ),
-    ];
+    return this.dispatchSide('frontend');
   }
 
   private maybeComplete(): AgentMessage[] {

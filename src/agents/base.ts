@@ -1,4 +1,4 @@
-import { ProjectConfig, Role, AgentMessage, MessageType, LogEntry } from '../types';
+import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
 import { chat } from '../core/llm';
 import { Logger, KnowledgeBase } from '../utils/file';
 
@@ -13,10 +13,6 @@ export abstract class BaseAgent {
     this.config = config;
     this.logger = logger;
     this.knowledge = knowledge;
-  }
-
-  getRole(): Role {
-    return this.role;
   }
 
   protected log(action: string, content: string, metadata?: Record<string, unknown>): void {
@@ -35,10 +31,7 @@ export abstract class BaseAgent {
       userMessage,
     });
     this.log('llm_response', `LLM响应: ${response.slice(0, 100)}...`);
-
-    // 提取知识点
     this.extractKnowledge(response);
-
     return response;
   }
 

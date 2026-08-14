@@ -1,6 +1,7 @@
 import { BaseAgent } from './base';
 import { ProjectConfig, Role, AgentMessage, MessageType, IssueLevel, ReviewFeedback, ReviewType, WorkScope } from '../types';
 import { Logger, KnowledgeBase } from '../utils/file';
+import { resolveReviewTarget, REVIEW_PASSED } from '../utils/review-target';
 
 export class ReviewerAgent extends BaseAgent {
   constructor(config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
@@ -8,39 +9,23 @@ export class ReviewerAgent extends BaseAgent {
   }
 
   getSystemPrompt(): string {
-    return `你是一个审查员角色，你的职责是：
+    return `你是审查员，对需求、接口文档、代码、用例给出分级反馈给项目经理。
 
-1. 对需求、接口文档、代码、用例进行审查，给出分级反馈给项目经理
-2. 需求审查：对比整理需求与原需求，检查前后端能力与数据实体是否完整
-3. 接口文档审查（轻量）：只检查路径、请求参数、响应、错误码是否完整一致，不审实现细节
-4. 代码审查：是否符合项目习惯、是否按需求与接口文档实现
-5. 测试用例审查：是否可执行、是否与需求/接口一致
+- 需求：检查前后端能力与数据实体是否完整
+- 接口文档（轻量）：只查路径、请求参数、响应、错误码
+- 代码：是否符合项目习惯、是否按需求与接口文档实现
+- 用例：是否可执行、是否与需求/接口一致
 
 审查反馈格式：
 ## 审查报告
-
 ### 审查类型：[需求/接口文档/代码/测试用例]
-
 ### 问题列表
-
 #### 问题1 [等级：高/中/低]
-- **描述**: [问题描述]
-- **位置**: [具体位置]
-- **建议**: [修改建议]
-- **目标角色**: [产品/架构/后端架构/前端架构/测试员]
-
-#### 问题2 [等级：高/中/低]
-...
-
+- **描述** / **位置** / **建议** / **目标角色**
 ### 总体评价
-[对审查内容的总体评价和建议]
 
-若无明显问题，请明确写「审查通过，无严重问题」。
-
-等级说明：
-- 高：严重问题，必须修改
-- 中：一般问题，建议修改
-- 低：轻微问题，可选修改
+若无明显问题，请明确写「${REVIEW_PASSED}」。
+等级：高=必须改，中=建议改，低=可选改。
 
 请用中文回复。`;
   }
@@ -121,7 +106,7 @@ ${content}
 3. 响应结构是否明确
 4. 错误码是否列出
 
-不要展开实现细节或代码风格。若契约完整可写「审查通过，无严重问题」。`;
+不要展开实现细节或代码风格。若契约完整可写「${REVIEW_PASSED}」。`;
   }
 
   private getCodeReviewPrompt(content: string, scope?: WorkScope): string {
@@ -158,7 +143,7 @@ ${content}
 
   private parseFeedbacks(reviewContent: string, reviewType: ReviewType, scope?: WorkScope): ReviewFeedback[] {
     const feedbacks: ReviewFeedback[] = [];
-    const defaultTarget = this.defaultTarget(reviewType, scope);
+    const defaultTarget = resolveReviewTarget(reviewType, scope);
 
     const levelPattern = /\[等级[：:](高|中|低)\]/g;
     let match;
@@ -192,28 +177,13 @@ ${content}
         reviewerRole: Role.REVIEWER,
         targetRole: defaultTarget,
         level: IssueLevel.LOW,
-        content: '审查通过，无严重问题',
+        content: REVIEW_PASSED,
         suggestion: '可以继续下一步',
         timestamp: new Date(),
       });
     }
 
     return feedbacks;
-  }
-
-  private defaultTarget(reviewType: ReviewType, scope?: WorkScope): Role {
-    switch (reviewType) {
-      case 'requirement':
-        return Role.PRODUCT;
-      case 'api_doc':
-        return Role.ARCHITECT_SYS;
-      case 'test':
-        return Role.TESTER;
-      case 'code':
-        return scope === 'backend' ? Role.BACKEND : Role.ARCHITECT;
-      default:
-        return Role.ARCHITECT;
-    }
   }
 
   private getHighestLevel(feedbacks: ReviewFeedback[]): IssueLevel {

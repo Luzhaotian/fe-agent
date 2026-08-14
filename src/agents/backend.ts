@@ -2,12 +2,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { BaseAgent } from './base';
 import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
-import { Logger, KnowledgeBase, Artifacts, listFiles, readFile, fileExists } from '../utils/file';
+import { Logger, KnowledgeBase, Artifacts, listFiles } from '../utils/file';
+import { getProjectStructure, ensureSkillsFile } from '../utils/project';
+import { CODE_OUTPUT_HINT } from '../utils/constants';
 
 export class BackendAgent extends BaseAgent {
   private artifacts: Artifacts;
-  private projectStructure: string = '';
-  private existingModules: string = '';
+  private projectStructure = '';
+  private existingModules = '';
 
   constructor(config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
     super(Role.BACKEND, config, logger, knowledge);
@@ -17,17 +19,11 @@ export class BackendAgent extends BaseAgent {
   getSystemPrompt(): string {
     return `你是一个后端架构角色，你的职责是：
 
-1. 严格按照已审核的接口文档实现后端代码，开发完成后发给项目经理审查
-2. 先查看是否有项目后端 skills；没有则根据项目结构生成 skills
-3. 优先复用已有模块与约定，不得自行发明与项目不符的风格
-4. 实现必须与接口文档中的路径、入参、出参、错误码一致
+1. 严格按已审核接口文档实现后端，完成后交项目经理送审
+2. 先查看/生成 backend skills，优先复用已有模块与约定
+3. 路径、入参、出参、错误码必须与接口文档一致
 
-代码输出格式：
-\`\`\`language:filepath
-// 代码内容
-\`\`\`
-
-若发现需要改基建/目录/依赖等非业务内容，在回复中标注 [NEEDS_ARCHITECT_SYS] 并说明原因。
+${CODE_OUTPUT_HINT}
 
 请用中文注释和回复。`;
   }
@@ -45,36 +41,12 @@ export class BackendAgent extends BaseAgent {
     }
   }
 
-  private async analyzeProject(): Promise<void> {
+  private analyzeProject(): void {
     if (this.projectStructure) return;
     this.log('analyze_project', '开始分析后端相关项目结构');
-    this.projectStructure = this.getProjectStructure(this.config.project.path);
+    this.projectStructure = getProjectStructure(this.config.project.path);
     this.existingModules = this.getExistingModules(this.config.project.path);
     this.log('analyze_project', '项目结构分析完成');
-  }
-
-  private getProjectStructure(projectPath: string): string {
-    const structure: string[] = [];
-    const scan = (dir: string, depth: number = 0): void => {
-      if (depth > 3) return;
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') continue;
-          const indent = '  '.repeat(depth);
-          if (entry.isDirectory()) {
-            structure.push(`${indent}${entry.name}/`);
-            scan(path.join(dir, entry.name), depth + 1);
-          } else {
-            structure.push(`${indent}${entry.name}`);
-          }
-        }
-      } catch {
-        // skip
-      }
-    };
-    scan(projectPath);
-    return structure.join('\n');
   }
 
   private getExistingModules(projectPath: string): string {
@@ -90,8 +62,7 @@ export class BackendAgent extends BaseAgent {
 
     for (const dir of candidateDirs) {
       if (!fs.existsSync(dir)) continue;
-      const files = listFiles(dir, /\.(ts|js|go|py|java)$/);
-      for (const file of files.slice(0, 40)) {
+      for (const file of listFiles(dir, /\.(ts|js|go|py|java)$/).slice(0, 40)) {
         modules.push(`- ${path.relative(projectPath, file)}`);
       }
     }
@@ -99,14 +70,12 @@ export class BackendAgent extends BaseAgent {
   }
 
   private async ensureSkills(): Promise<string> {
-    const skillsPath = path.join(this.config.project.path, '.fe-agent', 'skills', 'backend.md');
-    if (fileExists(skillsPath)) {
-      return readFile(skillsPath) || '';
-    }
-
-    this.log('skills_not_found', '未找到后端 skills，将自动生成');
-    const skills = await this.askLLM(
-      `你是后端架构专家，根据项目结构生成 backend skills。
+    const { content, created } = await ensureSkillsFile(
+      this.config.project.path,
+      'backend.md',
+      () =>
+        this.askLLM(
+          `你是后端架构专家，根据项目结构生成 backend skills。
 
 格式：
 # 后端 Skills
@@ -115,20 +84,19 @@ export class BackendAgent extends BaseAgent {
 ## 编码规范
 ## 模块复用约定
 ## API 实现模板`,
-      `项目结构：\n${this.projectStructure}\n\n已有模块：\n${this.existingModules || '未识别'}`
+          `项目结构：\n${this.projectStructure}\n\n已有模块：\n${this.existingModules || '未识别'}`
+        )
     );
-
-    const skillsDir = path.dirname(skillsPath);
-    if (!fs.existsSync(skillsDir)) fs.mkdirSync(skillsDir, { recursive: true });
-    fs.writeFileSync(skillsPath, skills, 'utf-8');
-    this.knowledge.addEntry(this.role, 'skills', '后端 skills 已生成', 'auto_generated');
-    this.log('skills_generated', '后端 skills 生成并保存完成');
-    return skills;
+    if (created) {
+      this.knowledge.addEntry(this.role, 'skills', '后端 skills 已生成', 'auto_generated');
+      this.log('skills_generated', '后端 skills 生成并保存完成');
+    }
+    return content;
   }
 
   private async handleDevelop(message: AgentMessage): Promise<AgentMessage[]> {
     this.log('develop_start', '开始后端开发');
-    await this.analyzeProject();
+    this.analyzeProject();
     const skills = await this.ensureSkills();
     const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
 
@@ -170,7 +138,7 @@ ${message.content}
 
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
     this.log('handle_review', '处理审查反馈，整改后端代码');
-    await this.analyzeProject();
+    this.analyzeProject();
     const apiDoc = this.artifacts.readApiDoc() || '';
 
     const response = await this.askLLM(

@@ -49,17 +49,13 @@ export class Orchestrator {
 
     this.state = {
       stage: WorkflowStage.REQUIREMENT_INPUT,
-      backendArtifacts: [],
-      frontendArtifacts: [],
-      testCases: [],
       reviewFeedbacks: [],
-      pendingQuestions: [],
       history: [],
     };
   }
 
   async start(requirement: string): Promise<void> {
-    console.log(chalk.cyan('\n🚀 前端智能体启动\n'));
+    console.log(chalk.cyan('\n🚀 全栈智能体启动\n'));
     console.log(chalk.dim(`项目: ${this.config.project.name}`));
     console.log(chalk.dim(`阶段: ${this.getStageLabel(this.state.stage)}\n`));
 
@@ -227,7 +223,6 @@ export class Orchestrator {
       [WorkflowStage.DEVELOP_FRONTEND]: '前端开发',
       [WorkflowStage.WRITE_FRONTEND_TEST]: '编写前端测试',
       [WorkflowStage.REVIEW_FRONTEND]: '审查前端',
-      [WorkflowStage.FIX_ISSUES]: '整改问题',
       [WorkflowStage.COMPLETE]: '完成',
     };
     return labels[stage];

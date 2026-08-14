@@ -1,12 +1,11 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import { BaseAgent } from './base';
 import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
-import { Logger, KnowledgeBase, Artifacts, readFile, fileExists } from '../utils/file';
+import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
+import { getProjectStructure, ensureSkillsFile } from '../utils/project';
 
 export class ArchitectSysAgent extends BaseAgent {
   private artifacts: Artifacts;
-  private projectStructure: string = '';
+  private projectStructure = '';
 
   constructor(config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
     super(Role.ARCHITECT_SYS, config, logger, knowledge);
@@ -16,11 +15,11 @@ export class ArchitectSysAgent extends BaseAgent {
   getSystemPrompt(): string {
     return `你是一个系统架构角色，你的职责是：
 
-1. 评估需求是否需要改动业务之外的内容（目录结构、依赖、基建、工程配置等），需要则给出改动方案和代码
-2. 根据已审核需求产出接口文档（API 契约），供后端实现、前端对接、测试编写用例
-3. 过程中若被分派非业务改动任务，只处理基建/结构问题，除非必要不要改业务接口约定
+1. 评估需求是否需要改动业务之外的内容（目录/依赖/基建/工程配置），需要则给出方案和代码
+2. 根据已审核需求产出接口文档，供后端实现、前端对接、测试编写用例
+3. 按需处理非业务改动时，只动基建/结构，除非必要不要改业务接口约定
 
-接口文档格式（必须遵守）：
+接口文档格式：
 ## 接口列表
 ### [METHOD] /path
 - 说明：
@@ -28,22 +27,15 @@ export class ArchitectSysAgent extends BaseAgent {
 - 响应：
 - 错误码：
 
-若无需后端接口，在文档中明确写「无需后端接口」，并在结论中标注 [SKIP_BACKEND]。
-若有基建改动，用代码块输出文件，格式：\`\`\`language:filepath
+若无需后端接口，文档中写「无需后端接口」，结论标注 [SKIP_BACKEND]。
+基建改动用代码块输出：\`\`\`language:filepath
 
 输出结构：
 ## 架构评估
-[是否需要基建改动、原因]
-
 ## 基建改动（如有）
-[代码块]
-
 ## 接口文档
-[完整接口文档 Markdown]
-
 ## 结论
 [SKIP_BACKEND] 或 [NEED_BACKEND]
-如有非业务后续建议，可标注 [NEEDS_ARCHITECT_SYS]
 
 请用中文回复。`;
   }
@@ -61,45 +53,20 @@ export class ArchitectSysAgent extends BaseAgent {
     }
   }
 
-  private async analyzeProject(): Promise<void> {
+  private analyzeProject(): void {
     if (this.projectStructure) return;
     this.log('analyze_project', '开始分析项目结构');
-    this.projectStructure = this.getProjectStructure(this.config.project.path);
+    this.projectStructure = getProjectStructure(this.config.project.path);
     this.log('analyze_project', '项目结构分析完成');
   }
 
-  private getProjectStructure(projectPath: string): string {
-    const structure: string[] = [];
-    const scan = (dir: string, depth: number = 0): void => {
-      if (depth > 3) return;
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') continue;
-          const indent = '  '.repeat(depth);
-          if (entry.isDirectory()) {
-            structure.push(`${indent}${entry.name}/`);
-            scan(path.join(dir, entry.name), depth + 1);
-          } else {
-            structure.push(`${indent}${entry.name}`);
-          }
-        }
-      } catch {
-        // skip
-      }
-    };
-    scan(projectPath);
-    return structure.join('\n');
-  }
-
   private async ensureSkills(): Promise<string> {
-    const skillsPath = path.join(this.config.project.path, '.fe-agent', 'skills', 'architect_sys.md');
-    if (fileExists(skillsPath)) {
-      return readFile(skillsPath) || '';
-    }
-
-    const skills = await this.askLLM(
-      `你是系统架构专家，根据项目结构生成 skills，指导基建与接口文档约定。
+    const { content, created } = await ensureSkillsFile(
+      this.config.project.path,
+      'architect_sys.md',
+      () =>
+        this.askLLM(
+          `你是系统架构专家，根据项目结构生成 skills，指导基建与接口文档约定。
 
 格式：
 # 系统架构 Skills
@@ -107,14 +74,13 @@ export class ArchitectSysAgent extends BaseAgent {
 ## 目录与模块边界
 ## 接口文档约定
 ## 基建改动原则`,
-      `项目结构：\n${this.projectStructure}`
+          `项目结构：\n${this.projectStructure}`
+        )
     );
-
-    const skillsDir = path.dirname(skillsPath);
-    if (!fs.existsSync(skillsDir)) fs.mkdirSync(skillsDir, { recursive: true });
-    fs.writeFileSync(skillsPath, skills, 'utf-8');
-    this.knowledge.addEntry(this.role, 'skills', '系统架构 skills 已生成', 'auto_generated');
-    return skills;
+    if (created) {
+      this.knowledge.addEntry(this.role, 'skills', '系统架构 skills 已生成', 'auto_generated');
+    }
+    return content;
   }
 
   private extractApiDoc(response: string): string {
@@ -130,7 +96,7 @@ export class ArchitectSysAgent extends BaseAgent {
     const infraOnly = Boolean(message.metadata?.infraOnly);
     this.log('arch_evaluate', infraOnly ? '处理按需基建任务' : '开始架构评估与接口文档产出');
 
-    await this.analyzeProject();
+    this.analyzeProject();
     const skills = await this.ensureSkills();
 
     const prompt = infraOnly
@@ -183,7 +149,7 @@ ${this.artifacts.readApiDoc() || '无'}`;
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
     this.log('handle_review', '根据审查反馈修订接口文档/基建');
 
-    await this.analyzeProject();
+    this.analyzeProject();
     const response = await this.askLLM(
       this.getSystemPrompt(),
       `审查反馈如下，请修订接口文档或基建改动：\n\n${message.content}\n\n## 当前接口文档\n${this.artifacts.readApiDoc() || '无'}\n\n## 项目结构\n${this.projectStructure}`
@@ -191,7 +157,6 @@ ${this.artifacts.readApiDoc() || '无'}`;
 
     const apiDoc = this.extractApiDoc(response);
     this.artifacts.saveApiDoc(apiDoc);
-
     const skipBackend = response.includes('[SKIP_BACKEND]') || /无需后端接口/.test(apiDoc);
 
     return [
