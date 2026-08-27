@@ -5,6 +5,7 @@ import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
 import { Logger, KnowledgeBase, Artifacts, listFiles, readFile } from '../utils/file';
 import { getProjectStructure, ensureSkillsFile } from '../utils/project';
 import { CODE_OUTPUT_HINT } from '../utils/constants';
+import { enrichResultMetadata } from '../utils/capability-gap';
 
 export class ArchitectAgent extends BaseAgent {
   private artifacts: Artifacts;
@@ -111,6 +112,10 @@ ${CODE_OUTPUT_HINT}
     this.analyzeProject();
     const skillsContent = await this.ensureSkills();
     const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
+    const useArtifacts = Boolean(message.metadata?.useArtifacts);
+    const requirement = useArtifacts
+      ? this.artifacts.readRequirement() || message.content
+      : message.content;
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
@@ -129,7 +134,7 @@ ${skillsContent || '暂无'}
 ${apiDoc || '无（纯前端或未提供）'}
 
 ## 需求
-${message.content}
+${requirement}
 
 ## 要求
 1. 严格按照项目已有的结构来写代码
@@ -143,11 +148,10 @@ ${message.content}
     this.log('develop_complete', '代码开发完成');
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
+      this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
         codeDelivered: true,
         scope: 'frontend',
-        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
-      }),
+      })),
     ];
   }
 
@@ -163,11 +167,10 @@ ${message.content}
     this.log('code_revised', '代码整改完成');
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
+      this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
         codeRevised: true,
         scope: 'frontend',
-        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
-      }),
+      })),
     ];
   }
 }

@@ -4,7 +4,7 @@ import * as readline from 'readline';
 import {
   ProjectConfig,
   Role,
-  RoleName,
+  RoleDefinition,
   AgentMessage,
   MessageType,
   WorkflowStage,
@@ -13,6 +13,7 @@ import {
   ReviewFeedback,
   ReviewType,
   WorkScope,
+  getRoleDisplayName,
 } from '../types';
 import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
 import { ManagerAgent } from '../agents/manager';
@@ -22,30 +23,44 @@ import { BackendAgent } from '../agents/backend';
 import { ArchitectAgent } from '../agents/architect';
 import { TesterAgent } from '../agents/tester';
 import { ReviewerAgent } from '../agents/reviewer';
+import { DynamicRoleAgent } from '../agents/dynamic';
 import { BaseAgent } from '../agents/base';
+import { RoleRegistry } from '../utils/role-registry';
 
 export class Orchestrator {
   private config: ProjectConfig;
   private logger: Logger;
   private knowledge: KnowledgeBase;
   private artifacts: Artifacts;
-  private agents: Map<Role, BaseAgent>;
+  private roleRegistry: RoleRegistry;
+  private agents: Map<string, BaseAgent>;
   private state: WorkflowState;
+  private manager: ManagerAgent;
 
   constructor(config: ProjectConfig) {
     this.config = config;
     this.logger = new Logger(config.project.path);
     this.knowledge = new KnowledgeBase(config.project.path);
     this.artifacts = new Artifacts(config.project.path);
+    this.roleRegistry = new RoleRegistry(config.project.path);
 
-    this.agents = new Map<Role, BaseAgent>();
-    this.agents.set(Role.MANAGER, new ManagerAgent(config, this.logger, this.knowledge));
+    this.manager = new ManagerAgent(config, this.logger, this.knowledge, {
+      roleRegistry: this.roleRegistry,
+      onRoleCreated: (def) => this.registerDynamicRole(def),
+    });
+
+    this.agents = new Map<string, BaseAgent>();
+    this.agents.set(Role.MANAGER, this.manager);
     this.agents.set(Role.PRODUCT, new ProductAgent(config, this.logger, this.knowledge));
     this.agents.set(Role.ARCHITECT_SYS, new ArchitectSysAgent(config, this.logger, this.knowledge));
     this.agents.set(Role.BACKEND, new BackendAgent(config, this.logger, this.knowledge));
     this.agents.set(Role.ARCHITECT, new ArchitectAgent(config, this.logger, this.knowledge));
     this.agents.set(Role.TESTER, new TesterAgent(config, this.logger, this.knowledge));
     this.agents.set(Role.REVIEWER, new ReviewerAgent(config, this.logger, this.knowledge));
+
+    for (const def of this.roleRegistry.listRoles()) {
+      this.registerDynamicRole(def);
+    }
 
     this.state = {
       stage: WorkflowStage.REQUIREMENT_INPUT,
@@ -54,10 +69,25 @@ export class Orchestrator {
     };
   }
 
+  registerDynamicRole(def: RoleDefinition): void {
+    this.agents.set(def.name, new DynamicRoleAgent(def, this.config, this.logger, this.knowledge));
+    this.logRoleRegistration(def);
+  }
+
+  private logRoleRegistration(def: RoleDefinition): void {
+    console.log(chalk.dim(`  ↳ 已加载自定义角色: ${def.displayName} (${def.name})`));
+  }
+
   async start(requirement: string): Promise<void> {
     console.log(chalk.cyan('\n🚀 全栈智能体启动\n'));
     console.log(chalk.dim(`项目: ${this.config.project.name}`));
-    console.log(chalk.dim(`阶段: ${this.getStageLabel(this.state.stage)}\n`));
+    console.log(chalk.dim(`阶段: ${this.getStageLabel(this.state.stage)}`));
+
+    const customRoles = this.roleRegistry.listRoles();
+    if (customRoles.length > 0) {
+      console.log(chalk.dim(`自定义角色: ${customRoles.length} 个`));
+    }
+    console.log('');
 
     const initialMessage: AgentMessage = {
       id: `msg_init_${Date.now()}`,
@@ -84,7 +114,7 @@ export class Orchestrator {
       return;
     }
 
-    const targetAgent = this.agents.get(message.to);
+    const targetAgent = this.agents.get(String(message.to));
     if (!targetAgent) {
       console.error(chalk.red(`未知角色: ${message.to}`));
       return;
@@ -102,8 +132,15 @@ export class Orchestrator {
           timestamp: new Date(),
           metadata: { resumeAfterUser: true },
         };
-        // 用户确认后让经理重新处理审查/分发
-        if (message.type === MessageType.QUESTION || message.type === MessageType.REVIEW_FEEDBACK) {
+        if (message.metadata?.pendingGap) {
+          userMessage.to = Role.MANAGER;
+          userMessage.type = MessageType.QUESTION;
+          userMessage.metadata = {
+            ...message.metadata,
+            needsUserDecision: false,
+            userAnswer: answer,
+          };
+        } else if (message.type === MessageType.QUESTION || message.type === MessageType.REVIEW_FEEDBACK) {
           userMessage.to = Role.MANAGER;
           userMessage.type = MessageType.REVIEW_FEEDBACK;
           userMessage.metadata = {
@@ -129,28 +166,108 @@ export class Orchestrator {
       return;
     }
 
-    const roleName = RoleName[message.to as Role];
+    const roleName = getRoleDisplayName(
+      message.to,
+      message.metadata?.customRoleDisplayName as string | undefined
+    );
     const spinner = ora(`${roleName} 处理中...`).start();
 
     try {
       const responses = await targetAgent.processMessage(message);
       spinner.succeed(`${roleName} 处理完成`);
 
-      for (const response of responses) {
-        this.displayAgentOutput(response);
-        this.updateWorkflowState(response);
-        await this.processMessage(response);
-        if (this.state.stage === WorkflowStage.COMPLETE) return;
+      if (message.to === Role.MANAGER) {
+        this.state.complexity = this.manager.getComplexity();
       }
+
+      await this.dispatchResponses(responses);
     } catch (error) {
       spinner.fail(`${roleName} 处理失败`);
       console.error(chalk.red(`错误: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
 
+  /** 同 parallelGroup 的消息并行执行，其余串行。 */
+  private async dispatchResponses(responses: AgentMessage[]): Promise<void> {
+    let i = 0;
+    while (i < responses.length) {
+      if (this.state.stage === WorkflowStage.COMPLETE) return;
+
+      const current = responses[i];
+      const groupId = current.metadata?.parallelGroup as string | undefined;
+
+      if (groupId && this.config.workflow?.parallelSideWork !== false) {
+        const group: AgentMessage[] = [];
+        while (i < responses.length && responses[i].metadata?.parallelGroup === groupId) {
+          group.push(responses[i]);
+          i += 1;
+        }
+        if (group.length > 1) {
+          await this.processParallelGroup(group);
+        } else {
+          this.displayAgentOutput(group[0]);
+          this.updateWorkflowState(group[0]);
+          await this.processMessage(group[0]);
+        }
+        continue;
+      }
+
+      this.displayAgentOutput(current);
+      this.updateWorkflowState(current);
+      await this.processMessage(current);
+      i += 1;
+    }
+  }
+
+  private async processParallelGroup(messages: AgentMessage[]): Promise<void> {
+    const label =
+      (messages[0].metadata?.parallelLabel as string) ||
+      messages.map((m) => getRoleDisplayName(m.to)).join(' + ');
+    const spinner = ora(`并行执行：${label}`).start();
+
+    try {
+      const settled = await Promise.all(
+        messages.map(async (msg) => {
+          this.state.history.push(msg);
+          this.updateWorkflowState(msg);
+
+          const agent = this.agents.get(String(msg.to));
+          if (!agent) {
+            throw new Error(`未知角色: ${msg.to}`);
+          }
+
+          const roleName = getRoleDisplayName(msg.to);
+          const outs = await agent.processMessage(msg);
+          return { msg, roleName, outs };
+        })
+      );
+
+      spinner.succeed(`并行完成：${label}`);
+
+      for (const item of settled) {
+        console.log(chalk.dim(`\n── ${getRoleDisplayName(item.msg.to)} 已完成 ──`));
+        for (const out of item.outs) {
+          this.displayAgentOutput(out);
+          this.updateWorkflowState(out);
+          await this.processMessage(out);
+          if (this.state.stage === WorkflowStage.COMPLETE) return;
+        }
+      }
+    } catch (error) {
+      spinner.fail(`并行失败：${label}`);
+      console.error(chalk.red(`错误: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  }
+
   private displayAgentOutput(message: AgentMessage): void {
-    const fromName = RoleName[message.from];
-    const toName = RoleName[message.to];
+    const fromName = getRoleDisplayName(
+      message.from,
+      message.metadata?.customRoleDisplayName as string | undefined
+    );
+    const toName = getRoleDisplayName(
+      message.to,
+      message.metadata?.customRoleDisplayName as string | undefined
+    );
 
     console.log(chalk.dim(`\n── ${fromName} → ${toName} [${message.type}] ──`));
 
@@ -175,6 +292,10 @@ export class Orchestrator {
       this.state.skipBackend = Boolean(message.metadata.skipBackend);
     }
 
+    if (message.metadata?.complexity) {
+      this.state.complexity = message.metadata.complexity as WorkflowState['complexity'];
+    }
+
     if (message.from === Role.MANAGER && message.to === Role.PRODUCT) {
       this.state.stage = WorkflowStage.PRODUCT_ORGANIZE;
     } else if (message.from === Role.MANAGER && message.to === Role.ARCHITECT_SYS) {
@@ -192,10 +313,16 @@ export class Orchestrator {
       const scope = message.metadata?.scope as WorkScope | undefined;
       if (reviewType === 'requirement') this.state.stage = WorkflowStage.REVIEW_REQUIREMENT;
       else if (reviewType === 'api_doc') this.state.stage = WorkflowStage.REVIEW_API_DOC;
-      else if (reviewType === 'code' || reviewType === 'test') {
+      else if (reviewType === 'code' || reviewType === 'test' || reviewType === 'code_and_test') {
         this.state.stage =
           scope === 'backend' ? WorkflowStage.REVIEW_BACKEND : WorkflowStage.REVIEW_FRONTEND;
       }
+    } else if (
+      message.from === Role.MANAGER &&
+      typeof message.to === 'string' &&
+      message.to.startsWith('custom:')
+    ) {
+      this.state.stage = WorkflowStage.CUSTOM_ROLE;
     }
 
     if (message.metadata?.workflowComplete) {
@@ -207,7 +334,8 @@ export class Orchestrator {
       if (feedbacks) this.state.reviewFeedbacks.push(...feedbacks);
     }
 
-    console.log(chalk.dim(`\n📍 当前阶段: ${this.getStageLabel(this.state.stage)}`));
+    const complexityHint = this.state.complexity ? ` | 分级=${this.state.complexity}` : '';
+    console.log(chalk.dim(`\n📍 当前阶段: ${this.getStageLabel(this.state.stage)}${complexityHint}`));
   }
 
   private getStageLabel(stage: WorkflowStage): string {
@@ -223,6 +351,7 @@ export class Orchestrator {
       [WorkflowStage.DEVELOP_FRONTEND]: '前端开发',
       [WorkflowStage.WRITE_FRONTEND_TEST]: '编写前端测试',
       [WorkflowStage.REVIEW_FRONTEND]: '审查前端',
+      [WorkflowStage.CUSTOM_ROLE]: '自定义角色执行',
       [WorkflowStage.COMPLETE]: '完成',
     };
     return labels[stage];
@@ -251,5 +380,9 @@ export class Orchestrator {
 
   getState(): WorkflowState {
     return this.state;
+  }
+
+  listCustomRoles(): RoleDefinition[] {
+    return this.roleRegistry.listRoles();
   }
 }

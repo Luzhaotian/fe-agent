@@ -1,14 +1,14 @@
-import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
+import { ProjectConfig, RoleKey, AgentMessage, MessageType } from '../types';
 import { chat } from '../core/llm';
 import { Logger, KnowledgeBase } from '../utils/file';
 
 export abstract class BaseAgent {
-  protected role: Role;
+  protected role: RoleKey;
   protected config: ProjectConfig;
   protected logger: Logger;
   protected knowledge: KnowledgeBase;
 
-  constructor(role: Role, config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
+  constructor(role: RoleKey, config: ProjectConfig, logger: Logger, knowledge: KnowledgeBase) {
     this.role = role;
     this.config = config;
     this.logger = logger;
@@ -39,9 +39,20 @@ export abstract class BaseAgent {
     const entries = this.knowledge.getEntries(this.role);
     if (entries.length === 0) return '';
 
+    const queryTokens = new Set(
+      query
+        .toLowerCase()
+        .split(/[\s，。、；：""''（）()\[\]{}]+/)
+        .filter((t) => t.length >= 2)
+    );
+
     const relevant = entries
-      .filter((e) => query.includes(e.category) || e.content.split('').some((c) => query.includes(c)))
-      .slice(0, 5);
+      .filter((e) => {
+        if (query.includes(e.category)) return true;
+        const contentTokens = e.content.toLowerCase().split(/[\s，。、]+/);
+        return contentTokens.some((t) => t.length >= 2 && queryTokens.has(t));
+      })
+      .slice(0, 3);
 
     if (relevant.length === 0) return '';
 
@@ -68,7 +79,7 @@ export abstract class BaseAgent {
   abstract getSystemPrompt(): string;
   abstract processMessage(message: AgentMessage): Promise<AgentMessage[]>;
 
-  createMessage(to: Role, type: MessageType, content: string, metadata?: Record<string, unknown>): AgentMessage {
+  createMessage(to: RoleKey, type: MessageType, content: string, metadata?: Record<string, unknown>): AgentMessage {
     return {
       id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       from: this.role,

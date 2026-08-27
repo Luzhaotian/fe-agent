@@ -15,10 +15,11 @@ export class ReviewerAgent extends BaseAgent {
 - 接口文档（轻量）：只查路径、请求参数、响应、错误码
 - 代码：是否符合项目习惯、是否按需求与接口文档实现
 - 用例：是否可执行、是否与需求/接口一致
+- 代码+用例合并审查：同时覆盖实现与用例，问题需标注目标角色（后端架构/前端架构/测试员）
 
 审查反馈格式：
 ## 审查报告
-### 审查类型：[需求/接口文档/代码/测试用例]
+### 审查类型：[需求/接口文档/代码/测试用例/代码与测试]
 ### 问题列表
 #### 问题1 [等级：高/中/低]
 - **描述** / **位置** / **建议** / **目标角色**
@@ -60,6 +61,9 @@ export class ReviewerAgent extends BaseAgent {
         break;
       case 'test':
         reviewPrompt = this.getTestReviewPrompt(message.content, scope);
+        break;
+      case 'code_and_test':
+        reviewPrompt = this.getMergedReviewPrompt(message.content, scope);
         break;
       default:
         reviewPrompt = this.getCodeReviewPrompt(message.content, scope);
@@ -139,6 +143,25 @@ ${content}
 4. 预期结果是否明确
 
 请给出审查报告，标注问题等级和建议。`;
+  }
+
+  private getMergedReviewPrompt(content: string, scope?: WorkScope): string {
+    const side = scope === 'backend' ? '后端' : '前端';
+    const codeRole = scope === 'backend' ? '后端架构' : '前端架构';
+    return `请合并审查以下${side}代码与测试用例（一次给出结论）：
+
+${content}
+
+审查要点：
+【代码】
+1. 是否按需求与接口文档实现
+2. 是否符合项目习惯，有无明显 bug/安全问题
+【测试用例】
+3. 是否可执行、与需求/接口一致
+4. 功能点与边界是否覆盖
+
+问题请标注目标角色（${codeRole} 或 测试员）。
+若代码与用例均无明显问题，请明确写「${REVIEW_PASSED}」。`;
   }
 
   private parseFeedbacks(reviewContent: string, reviewType: ReviewType, scope?: WorkScope): ReviewFeedback[] {

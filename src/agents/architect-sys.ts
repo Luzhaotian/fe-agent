@@ -2,6 +2,7 @@ import { BaseAgent } from './base';
 import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
 import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
 import { getProjectStructure, ensureSkillsFile } from '../utils/project';
+import { enrichResultMetadata } from '../utils/capability-gap';
 
 export class ArchitectSysAgent extends BaseAgent {
   private artifacts: Artifacts;
@@ -136,13 +137,12 @@ ${this.artifacts.readApiDoc() || '无'}`;
     this.log('arch_evaluate_done', '架构评估完成', { skipBackend, apiDocLength: apiDoc.length });
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
+      this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
         apiDocDelivered: !infraOnly,
         apiDoc,
         skipBackend,
         infraOnly,
-        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
-      }),
+      })),
     ];
   }
 

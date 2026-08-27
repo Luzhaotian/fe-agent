@@ -39,6 +39,13 @@ export function loadConfig(projectPath: string): ProjectConfig {
       framework: localConfig.project?.framework,
       language: localConfig.project?.language,
     },
+    workflow: {
+      skipManagerAnalysis: localConfig.workflow?.skipManagerAnalysis ?? true,
+      useArtifactRefs: localConfig.workflow?.useArtifactRefs ?? true,
+      parallelSideWork: localConfig.workflow?.parallelSideWork ?? true,
+      mergeCodeTestReview: localConfig.workflow?.mergeCodeTestReview ?? true,
+      taskComplexity: localConfig.workflow?.taskComplexity ?? 'auto',
+    },
   };
 
   return config;

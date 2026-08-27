@@ -45,6 +45,10 @@ export class TesterAgent extends BaseAgent {
     this.log('write_testcase', `开始编写${side}测试用例`);
 
     const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
+    const useArtifacts = Boolean(message.metadata?.useArtifacts);
+    const requirement = useArtifacts
+      ? this.artifacts.readRequirement() || message.content
+      : message.content;
 
     const focus =
       scope === 'backend'
@@ -53,7 +57,15 @@ export class TesterAgent extends BaseAgent {
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `请根据以下内容编写完整的${side}测试用例：\n\n${message.content}\n\n## 接口文档\n${apiDoc || '无'}\n\n要求：
+      `请根据以下内容编写完整的${side}测试用例：
+
+## 需求
+${requirement}
+
+## 接口文档
+${apiDoc || '无'}
+
+要求：
 1. 覆盖所有相关功能点
 2. 包含正常流程和异常流程
 3. 考虑边界条件

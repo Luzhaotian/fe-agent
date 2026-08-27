@@ -5,6 +5,7 @@ import { ProjectConfig, Role, AgentMessage, MessageType } from '../types';
 import { Logger, KnowledgeBase, Artifacts, listFiles } from '../utils/file';
 import { getProjectStructure, ensureSkillsFile } from '../utils/project';
 import { CODE_OUTPUT_HINT } from '../utils/constants';
+import { enrichResultMetadata } from '../utils/capability-gap';
 
 export class BackendAgent extends BaseAgent {
   private artifacts: Artifacts;
@@ -99,6 +100,10 @@ ${CODE_OUTPUT_HINT}
     this.analyzeProject();
     const skills = await this.ensureSkills();
     const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
+    const useArtifacts = Boolean(message.metadata?.useArtifacts);
+    const requirement = useArtifacts
+      ? this.artifacts.readRequirement() || message.content
+      : message.content;
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
@@ -117,7 +122,7 @@ ${skills || '暂无'}
 ${apiDoc || '无'}
 
 ## 需求与指示
-${message.content}
+${requirement}
 
 ## 要求
 1. 严格按接口文档实现
@@ -128,11 +133,10 @@ ${message.content}
     this.log('develop_complete', '后端开发完成');
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
+      this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
         codeDelivered: true,
         scope: 'backend',
-        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
-      }),
+      })),
     ];
   }
 
@@ -149,11 +153,10 @@ ${message.content}
     this.log('code_revised', '后端代码整改完成');
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
+      this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
         codeRevised: true,
         scope: 'backend',
-        needsArchitectSys: response.includes('[NEEDS_ARCHITECT_SYS]'),
-      }),
+      })),
     ];
   }
 }

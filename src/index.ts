@@ -10,6 +10,7 @@ import { Orchestrator } from './core/orchestrator';
 import { loadConfig, validateConfig, initConfig } from './utils/config';
 import { Logger, KnowledgeBase } from './utils/file';
 import { Role } from './types';
+import { RoleRegistry } from './utils/role-registry';
 
 const VERSION = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
@@ -222,6 +223,29 @@ program
   });
 
 program
+  .command('roles')
+  .description('查看运行时自动创建的自定义角色')
+  .action(() => {
+    const projectPath = process.cwd();
+    const registry = new RoleRegistry(projectPath);
+    const roles = registry.listRoles();
+
+    if (roles.length === 0) {
+      console.log(chalk.dim('\n暂无自定义角色（运行中遇到能力缺口时会自动创建）\n'));
+      return;
+    }
+
+    console.log(chalk.cyan(`\n🎭 自定义角色（${roles.length}）\n`));
+    for (const role of roles) {
+      console.log(chalk.yellow(`${role.displayName}`));
+      console.log(chalk.dim(`  ID: ${role.name}`));
+      console.log(chalk.dim(`  描述: ${role.description}`));
+      console.log(chalk.dim(`  标签: ${role.tags.join(', ')}`));
+      console.log(chalk.dim(`  创建: ${role.createdAt}\n`));
+    }
+  });
+
+program
   .command('status')
   .description('查看项目状态')
   .action(() => {
@@ -235,7 +259,7 @@ program
       return;
     }
 
-    const dirs = ['logs', 'knowledge', 'skills', 'artifacts'];
+    const dirs = ['logs', 'knowledge', 'skills', 'artifacts', 'roles'];
     for (const dir of dirs) {
       const dirPath = path.join(agentDir, dir);
       if (fs.existsSync(dirPath)) {

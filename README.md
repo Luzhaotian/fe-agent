@@ -7,6 +7,7 @@
 ## 核心特性
 
 - **7 个 AI 角色协作**：项目经理、产品、架构、后端架构、前端架构、测试员、审查员
+- **动态扩角色**：执行中若现有角色无法处理，自动匹配或创建自定义角色（落盘 `.fe-agent/roles/`）
 - **全栈覆盖**：同一链路打通接口文档 → 后端 → 前端，而不是只写页面
 - **后端优先**：先出接口文档并轻量审查，再写后端，最后写前端
 - **架构角色**：处理非业务基建改动，并产出接口文档
@@ -77,6 +78,7 @@ fe-agent logs -r backend
 fe-agent logs -r architect_sys
 fe-agent knowledge
 fe-agent knowledge -r architect
+fe-agent roles
 fe-agent status
 ```
 
@@ -129,11 +131,60 @@ flowchart TD
 **执行顺序要点：**
 
 1. 消息驱动：角色之间不直接调用，一律经项目经理分发。
-2. 关卡制：接口文档过审后才进后端；后端 code + 后端测试都过审后才进前端。
-3. 同批排队：同一关卡内「开发」与「写用例」会一并分发，编排器按消息顺序串行执行。
-4. 捷径：架构标注无需后端时，跳过后端关卡直达前端。
-5. 旁路：过程中的基建/目录/依赖等非业务改动，随时转给架构，处理完再回到原阶段。
-6. 高级问题：审查或提问为「高」时打断，询问用户后再继续。
+2. **任务分级**：开局按规则分为 `simple` / `standard` / `full`（可配置强制）。
+3. 关卡制（standard/full）：接口文档过审后才进后端；后端过审后才进前端。
+4. **同批并行**：同一关卡内「开发」与「写用例」默认并行执行。
+5. **合并审查**（simple/standard）：同侧代码+用例一次审完；full 仍分审。
+6. **快路径（simple）**：产品整理 → 前端开发∥用例 → 一次合并审查 → 完成（跳过需求审、架构、接口审、后端）。
+7. 捷径：架构标注无需后端时，跳过后端关卡直达前端。
+8. 旁路：基建/目录/依赖等非业务改动，随时转给架构，处理完再回到原阶段。
+9. 高级问题：审查或提问为「高」时打断，询问用户后再继续。
+10. 动态角色：`[NEEDS_NEW_ROLE]` 或规则匹配缺口时自动创建/委派；敏感能力需用户确认。
+
+## 动态角色
+
+内置 7 角色覆盖常规全栈流程。当执行中发现能力缺口时：
+
+1. **A 触发（主）**：任意角色在回复中标注能力缺口：
+   ```
+   [NEEDS_NEW_ROLE]
+   capability: 数据迁移脚本
+   reason: 后端角色只覆盖 API，不负责一次性存量迁移
+   tags: data-migration, sql
+   sensitive: no
+   ```
+2. **B 触发（辅）**：需求审查通过后，经理按标签/关键词规则匹配已有自定义角色。
+3. **自动创建**：无匹配时由 LLM 生成角色定义，写入 `.fe-agent/roles/<name>.json`，并立即委派执行。
+4. **完成后**：自定义角色交回经理，恢复原流程。
+
+查看已创建角色：`fe-agent roles`
+
+## 链路加速
+
+| 优化项 | 说明 |
+|--------|------|
+| 任务分级快路径 | `simple` 跳过需求审/架构/接口审/后端 |
+| 同批并行 | 开发与测试并行（`parallelSideWork`） |
+| 合并审查 | 同侧代码+用例一次审（`mergeCodeTestReview`；`full` 自动关闭） |
+| 跳过经理开局分析 | 默认不再为分发多调一次 LLM |
+| 产物引用 | 开发/测试引用 artifacts，少重复粘贴全文 |
+| 知识库检索 | 按词匹配，避免无效知识塞进 prompt |
+
+`fe-agent.config.json` 可配置：
+
+```json
+{
+  "workflow": {
+    "skipManagerAnalysis": true,
+    "useArtifactRefs": true,
+    "parallelSideWork": true,
+    "mergeCodeTestReview": true,
+    "taskComplexity": "auto"
+  }
+}
+```
+
+`taskComplexity`：`auto`（默认规则判断）| `simple` | `standard` | `full`。
 
 ## 项目结构（运行时）
 
@@ -145,8 +196,10 @@ flowchart TD
 │   ├── architect.md
 │   ├── backend.md
 │   └── architect_sys.md
+├── roles/           # 运行时自动创建的自定义角色
 └── artifacts/
-    └── api-doc.md   # 当前任务接口文档
+    ├── api-doc.md       # 当前任务接口文档
+    └── requirement.md   # 当前任务需求
 ```
 
 ## 配置
