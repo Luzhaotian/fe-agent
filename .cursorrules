@@ -1,0 +1,52 @@
+# fe-agent — Cursor 规则
+
+## Git 提交信息
+
+遵循 [Conventional Commits](https://www.conventionalcommits.org/)，与仓库历史风格一致。
+
+### 格式（默认单行）
+
+```
+<type>(<可选 scope>): <中文简述>
+```
+
+- **优先中文**简述；无句末句号；祈使/动宾清晰
+- **尽量一行写完**（含 type/scope），总长 ≤ 72；一般不写 body / footer
+- 一次提交只做一件事；无关改动拆开提交
+- 仅破坏性变更时才加多行：`BREAKING CHANGE:` 或 `feat!: ...`
+
+### type 说明
+
+| type | 用途 |
+|------|------|
+| `feat` | 新功能 |
+| `fix` | 修复缺陷 |
+| `docs` | 仅文档 |
+| `style` | 格式/空格（无逻辑变更） |
+| `refactor` | 重构（行为不变） |
+| `perf` | 性能优化 |
+| `test` | 测试增改 |
+| `build` | 构建或依赖 |
+| `ci` | CI 配置 |
+| `chore` | 杂项维护 |
+| `revert` | 回滚提交 |
+
+### scope（可选）
+
+局部改动时优先：`agents`、`orchestrator`、`llm`、`cli`、`workflow`、`artifacts`、`config`、`deps`
+
+### 示例
+
+```
+feat(agents): 增加动态角色续跑栈
+fix(reviewer): 审查 JSON 解析失败时默认不通过
+docs: 补充 fe-agent apply 说明
+test: 覆盖能力缺口块解析
+chore: 接入 husky 与 commitlint
+```
+
+### 禁止
+
+- 含糊标题：`update`、`fix stuff`、`wip`、`临时提交`
+- 提交密钥（`.env`、token 等）
+- 除非用户明确要求，否则不要 `--no-verify`

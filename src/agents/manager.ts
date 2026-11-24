@@ -16,8 +16,9 @@ import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
 import { resolveRevisionTargets } from '../utils/review-target';
 import { RoleRegistry } from '../utils/role-registry';
 import { createRoleDefinition } from '../utils/role-creator';
-import { buildScopedTaskContent } from '../utils/message-content';
+import { buildScopedTaskContent, buildReviewTaskContent } from '../utils/message-content';
 import { classifyTaskComplexity } from '../utils/task-complexity';
+import { isReviewPassed } from '../utils/review-parse';
 
 export interface ManagerDeps {
   roleRegistry: RoleRegistry;
@@ -25,6 +26,7 @@ export interface ManagerDeps {
 }
 
 type SideBuffer = { code?: string; test?: string };
+type Continuation = () => Promise<AgentMessage[]>;
 
 /**
  * 项目经理：统筹分发。
@@ -52,7 +54,8 @@ export class ManagerAgent extends BaseAgent {
   };
 
   private resumeAfterArchitectSys: AgentMessage | null = null;
-  private pendingContinuation: (() => Promise<AgentMessage[]>) | null = null;
+  /** 栈：后进先出，支持连续能力缺口嵌套恢复 */
+  private continuationStack: Continuation[] = [];
 
   constructor(
     config: ProjectConfig,
@@ -86,6 +89,10 @@ export class ManagerAgent extends BaseAgent {
   async processMessage(message: AgentMessage): Promise<AgentMessage[]> {
     this.log('receive_message', `收到来自 ${message.from} 的消息: ${message.type}`);
 
+    if (message.metadata?.resumeAfterUser && message.type === MessageType.TASK) {
+      return this.handleUserResume(message);
+    }
+
     const gap = message.metadata?.needsNewRole as CapabilityGap | undefined;
     if (gap && message.from !== Role.MANAGER) {
       return this.handleCapabilityGap(message, gap);
@@ -109,11 +116,34 @@ export class ManagerAgent extends BaseAgent {
     }
   }
 
-  private async handleNewRequirement(message: AgentMessage): Promise<AgentMessage[]> {
-    if (message.metadata?.resumeAfterUser) {
-      return this.handleResult(message);
+  private async handleUserResume(message: AgentMessage): Promise<AgentMessage[]> {
+    this.log('user_resume', '用户决策后恢复流程');
+    if (message.metadata?.reviewType) {
+      return this.handleReviewFeedback({
+        ...message,
+        type: MessageType.REVIEW_FEEDBACK,
+        metadata: {
+          ...message.metadata,
+          highestLevel: IssueLevel.LOW,
+          reviewPassed: true,
+          feedbacks: [
+            {
+              id: `fb_user_${Date.now()}`,
+              reviewerRole: Role.REVIEWER,
+              targetRole: Role.MANAGER,
+              level: IssueLevel.LOW,
+              content: `用户决定：${message.content}`,
+              suggestion: message.content,
+              timestamp: new Date(),
+            },
+          ],
+        },
+      });
     }
+    return this.handleResult(message);
+  }
 
+  private async handleNewRequirement(message: AgentMessage): Promise<AgentMessage[]> {
     this.requirementContent = message.content;
     this.artifacts.saveRequirement(message.content);
     this.resetGates();
@@ -167,10 +197,20 @@ export class ManagerAgent extends BaseAgent {
     this.frontendTestApproved = false;
     this.apiDocContent = '';
     this.resumeAfterArchitectSys = null;
-    this.pendingContinuation = null;
+    this.continuationStack = [];
     this.sideBuffers = { backend: {}, frontend: {} };
     this.complexity = 'standard';
     this.mergeReviews = this.config.workflow?.mergeCodeTestReview !== false;
+  }
+
+  private pushContinuation(fn: Continuation): void {
+    this.continuationStack.push(fn);
+  }
+
+  private async popContinuation(): Promise<AgentMessage[]> {
+    const cont = this.continuationStack.pop();
+    if (!cont) return [];
+    return cont();
   }
 
   private isCustomRole(role: string): boolean {
@@ -180,9 +220,7 @@ export class ManagerAgent extends BaseAgent {
   private async handleCapabilityGap(message: AgentMessage, gap: CapabilityGap): Promise<AgentMessage[]> {
     this.log('capability_gap', `检测到能力缺口: ${gap.capability}`);
 
-    if (!this.pendingContinuation) {
-      this.pendingContinuation = async () => this.handleResult(message);
-    }
+    this.pushContinuation(async () => this.handleResult(message));
 
     const matched = this.deps.roleRegistry.matchRole(
       `${gap.capability}\n${gap.reason}\n${message.content}`,
@@ -224,7 +262,7 @@ export class ManagerAgent extends BaseAgent {
         def.name,
         MessageType.TASK,
         `## 能力缺口\n${gap.capability}\n\n## 原因\n${gap.reason}\n\n## 上下文\n${excerpt}`,
-        { customRole: def.name, capabilityGap: gap }
+        { customRole: def.name, capabilityGap: gap, customRoleDisplayName: def.displayName }
       ),
     ];
   }
@@ -232,12 +270,7 @@ export class ManagerAgent extends BaseAgent {
   private async handleResult(message: AgentMessage): Promise<AgentMessage[]> {
     if (this.isCustomRole(String(message.from))) {
       this.log('custom_role_done', `自定义角色 ${message.from} 完成`);
-      if (this.pendingContinuation) {
-        const cont = this.pendingContinuation;
-        this.pendingContinuation = null;
-        return await cont();
-      }
-      return [];
+      return this.popContinuation();
     }
 
     if (message.from === Role.PRODUCT) {
@@ -288,15 +321,18 @@ export class ManagerAgent extends BaseAgent {
     }
 
     if (message.from === Role.BACKEND) {
+      this.artifacts.saveCode('backend', message.content);
       return this.onSideDeliverable('backend', 'code', message.content);
     }
 
     if (message.from === Role.ARCHITECT) {
+      this.artifacts.saveCode('frontend', message.content);
       return this.onSideDeliverable('frontend', 'code', message.content);
     }
 
     if (message.from === Role.TESTER) {
       const scope = ((message.metadata?.scope as WorkScope) || 'frontend') as 'backend' | 'frontend';
+      this.artifacts.saveTests(scope, message.content);
       return this.onSideDeliverable(scope, 'test', message.content);
     }
 
@@ -308,6 +344,8 @@ export class ManagerAgent extends BaseAgent {
     kind: 'code' | 'test',
     content: string
   ): AgentMessage[] {
+    const useArtifacts = this.config.workflow?.useArtifactRefs !== false;
+
     if (this.mergeReviews) {
       this.sideBuffers[scope][kind] = content;
       const buf = this.sideBuffers[scope];
@@ -319,42 +357,43 @@ export class ManagerAgent extends BaseAgent {
       const test = buf.test;
       this.sideBuffers[scope] = {};
       this.log('dispatch', `合并审查${scope === 'backend' ? '后端' : '前端'}代码与用例`);
+      const task = buildReviewTaskContent(
+        this.artifacts,
+        scope,
+        'code_and_test',
+        { code, test },
+        useArtifacts
+      );
       return [
-        this.createMessage(
-          Role.REVIEWER,
-          MessageType.TASK,
-          `请合并审查以下${scope === 'backend' ? '后端' : '前端'}代码与测试用例：\n\n## 代码\n${code}\n\n## 测试用例\n${test}`,
-          { reviewType: 'code_and_test' satisfies ReviewType, scope }
-        ),
+        this.createMessage(Role.REVIEWER, MessageType.TASK, task, {
+          reviewType: 'code_and_test' satisfies ReviewType,
+          scope,
+          useArtifacts,
+        }),
       ];
     }
 
     if (kind === 'code') {
       this.log('dispatch', `将${scope === 'backend' ? '后端' : '前端'}代码发给审查员审查`);
+      const task = buildReviewTaskContent(this.artifacts, scope, 'code', { code: content }, useArtifacts);
       return [
-        this.createMessage(Role.REVIEWER, MessageType.TASK, `请审查以下代码：\n${content}`, {
+        this.createMessage(Role.REVIEWER, MessageType.TASK, task, {
           reviewType: 'code' satisfies ReviewType,
           scope,
+          useArtifacts,
         }),
       ];
     }
 
     this.log('dispatch', `将${scope === 'backend' ? '后端' : '前端'}测试用例发给审查员审查`);
+    const task = buildReviewTaskContent(this.artifacts, scope, 'test', { test: content }, useArtifacts);
     return [
-      this.createMessage(Role.REVIEWER, MessageType.TASK, `请审查以下测试用例：\n${content}`, {
+      this.createMessage(Role.REVIEWER, MessageType.TASK, task, {
         reviewType: 'test' satisfies ReviewType,
         scope,
+        useArtifacts,
       }),
     ];
-  }
-
-  private isReviewPassed(message: AgentMessage, feedbacks: ReviewFeedback[]): boolean {
-    const highest = (message.metadata?.highestLevel as IssueLevel) || IssueLevel.LOW;
-    if (highest === IssueLevel.HIGH || highest === IssueLevel.MEDIUM) return false;
-    const text = message.content;
-    if (/审查通过|无严重问题|可以继续|无问题/.test(text)) return true;
-    if (feedbacks.length === 1 && feedbacks[0].content.includes('审查通过')) return true;
-    return highest === IssueLevel.LOW;
   }
 
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
@@ -362,17 +401,18 @@ export class ManagerAgent extends BaseAgent {
     const highest = (message.metadata?.highestLevel as IssueLevel) || IssueLevel.LOW;
     const reviewType = (message.metadata?.reviewType as ReviewType) || 'code';
     const scope = message.metadata?.scope as WorkScope | undefined;
+    const parsedPassed = message.metadata?.reviewPassed as boolean | undefined;
 
     this.log('review_feedback', `收到审查反馈，类型=${reviewType} scope=${scope || '-'} 等级=${highest}`);
 
-    if (this.isReviewPassed(message, feedbacks)) {
+    if (isReviewPassed(message.content, feedbacks, highest, parsedPassed)) {
       return this.advanceAfterApprovedReview(reviewType, scope);
     }
 
-    if (highest === IssueLevel.HIGH) {
+    if (highest === IssueLevel.HIGH || message.metadata?.parseUncertain) {
       const response = await this.askLLM(
         this.getSystemPrompt(),
-        `收到高级审查反馈：\n${message.content}\n\n请给出给用户的决策建议。`
+        `收到${message.metadata?.parseUncertain ? '无法解析的' : '高级'}审查反馈：\n${message.content}\n\n请给出给用户的决策建议。`
       );
       return [
         this.createMessage(
@@ -387,16 +427,19 @@ export class ManagerAgent extends BaseAgent {
     const targets = resolveRevisionTargets(reviewType, scope);
 
     if (highest === IssueLevel.MEDIUM) {
-      const pastKnowledge = this.knowledge.searchEntries(this.role, message.content.slice(0, 50));
+      const pastKnowledge = this.knowledge.searchEntries(
+        this.role,
+        `${reviewType} ${scope || ''} ${message.content}`,
+        5
+      );
       if (pastKnowledge.length === 0) {
-        return [
-          this.createMessage(
-            Role.MANAGER,
-            MessageType.QUESTION,
-            `中级审查反馈，无历史记录，需要确认：\n${message.content}`,
-            { level: IssueLevel.MEDIUM, needsUserDecision: true, reviewType, scope }
-          ),
-        ];
+        // 中级且无历史：默认自动整改，不再一律打断用户
+        this.log('auto_revise', '中级问题无历史记录，自动派发整改');
+        return this.buildRevisionMessages(
+          targets,
+          `请根据审查反馈整改：\n${message.content}`,
+          { feedbacks, reviewType, scope, apiDoc: this.apiDocContent }
+        );
       }
       this.log('knowledge_lookup', '从知识库中找到相关历史记录');
       return this.buildRevisionMessages(
@@ -438,7 +481,8 @@ export class ManagerAgent extends BaseAgent {
     return targets.map((to) =>
       this.createMessage(to, MessageType.REVIEW_FEEDBACK, content, {
         ...metadata,
-        scope: metadata.scope || (to === Role.TESTER ? undefined : metadata.scope),
+        // Tester 必须带上 scope，避免默认 frontend
+        scope: scope || metadata.scope,
         ...(parallel
           ? {
               parallelGroup: `revise-${scope}`,
@@ -454,7 +498,7 @@ export class ManagerAgent extends BaseAgent {
       const proactiveRole = this.deps.roleRegistry.matchRole(this.requirementContent);
       if (proactiveRole) {
         this.log('role_match', `需求审查后匹配自定义角色: ${proactiveRole.displayName}`);
-        this.pendingContinuation = async () => this.continueAfterRequirementReview();
+        this.pushContinuation(async () => this.continueAfterRequirementReview());
         return this.dispatchToCustomRole(
           proactiveRole,
           {
@@ -550,19 +594,17 @@ export class ManagerAgent extends BaseAgent {
       ? { parallelGroup: `side-${scope}`, parallelLabel: `${side}开发与测试` }
       : {};
 
+    // useArtifacts 时不在 metadata 重复塞全文 apiDoc，降 token 传递面
+    const sharedMeta = {
+      scope,
+      useArtifacts,
+      ...(useArtifacts ? {} : { apiDoc }),
+      ...parallelMeta,
+    };
+
     return [
-      this.createMessage(devRole, MessageType.TASK, taskBody, {
-        apiDoc,
-        scope,
-        useArtifacts,
-        ...parallelMeta,
-      }),
-      this.createMessage(Role.TESTER, MessageType.TASK, taskBody, {
-        apiDoc,
-        scope,
-        useArtifacts,
-        ...parallelMeta,
-      }),
+      this.createMessage(devRole, MessageType.TASK, taskBody, sharedMeta),
+      this.createMessage(Role.TESTER, MessageType.TASK, taskBody, sharedMeta),
     ];
   }
 
@@ -614,7 +656,7 @@ export class ManagerAgent extends BaseAgent {
       if (/^(yes|y|是|同意|允许|ok)$/i.test(userAnswer.trim())) {
         return this.createAndDispatchRole(pendingGap, gapContext || '');
       }
-      this.pendingContinuation = null;
+      this.continuationStack.pop();
       return [
         this.createMessage(Role.MANAGER, MessageType.RESULT, '用户拒绝创建新角色，已跳过该能力缺口。', {}),
       ];
@@ -625,6 +667,8 @@ export class ManagerAgent extends BaseAgent {
         this.createMessage(Role.MANAGER, MessageType.QUESTION, message.content, {
           level: IssueLevel.HIGH,
           needsUserDecision: true,
+          reviewType: message.metadata?.reviewType,
+          scope: message.metadata?.scope,
         }),
       ];
     }

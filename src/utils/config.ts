@@ -8,13 +8,11 @@ const CONFIG_FILE = '.env';
 const LOCAL_CONFIG_FILE = 'fe-agent.config.json';
 
 export function loadConfig(projectPath: string): ProjectConfig {
-  // 加载 .env
   const envPath = path.join(projectPath, CONFIG_FILE);
   if (fs.existsSync(envPath)) {
     dotenv.config({ path: envPath });
   }
 
-  // 加载本地配置
   const localConfigPath = path.join(projectPath, LOCAL_CONFIG_FILE);
   let localConfig: Partial<ProjectConfig> = {};
   if (fs.existsSync(localConfigPath)) {
@@ -32,6 +30,10 @@ export function loadConfig(projectPath: string): ProjectConfig {
       model: process.env.LLM_MODEL || localConfig.llm?.model || 'gpt-4o',
       temperature: Number(process.env.LLM_TEMPERATURE) || localConfig.llm?.temperature || 0.7,
       maxTokens: Number(process.env.LLM_MAX_TOKENS) || localConfig.llm?.maxTokens || 4096,
+      timeoutMs: Number(process.env.LLM_TIMEOUT_MS) || localConfig.llm?.timeoutMs || 120_000,
+      maxRetries: Number(process.env.LLM_MAX_RETRIES) || localConfig.llm?.maxRetries || 3,
+      codeMaxTokens:
+        Number(process.env.LLM_CODE_MAX_TOKENS) || localConfig.llm?.codeMaxTokens || 8192,
     },
     project: {
       name: localConfig.project?.name || path.basename(projectPath),
@@ -45,6 +47,7 @@ export function loadConfig(projectPath: string): ProjectConfig {
       parallelSideWork: localConfig.workflow?.parallelSideWork ?? true,
       mergeCodeTestReview: localConfig.workflow?.mergeCodeTestReview ?? true,
       taskComplexity: localConfig.workflow?.taskComplexity ?? 'auto',
+      maxKnowledgeEntries: localConfig.workflow?.maxKnowledgeEntries ?? 200,
     },
   };
 

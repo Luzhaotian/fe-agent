@@ -15,7 +15,7 @@ import {
   WorkScope,
   getRoleDisplayName,
 } from '../types';
-import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
+import { Logger, KnowledgeBase, Artifacts, saveWorkflowSnapshot } from '../utils/file';
 import { ManagerAgent } from '../agents/manager';
 import { ProductAgent } from '../agents/product';
 import { ArchitectSysAgent } from '../agents/architect-sys';
@@ -40,7 +40,10 @@ export class Orchestrator {
   constructor(config: ProjectConfig) {
     this.config = config;
     this.logger = new Logger(config.project.path);
-    this.knowledge = new KnowledgeBase(config.project.path);
+    this.knowledge = new KnowledgeBase(
+      config.project.path,
+      config.workflow?.maxKnowledgeEntries ?? 200
+    );
     this.artifacts = new Artifacts(config.project.path);
     this.roleRegistry = new RoleRegistry(config.project.path);
 
@@ -78,6 +81,21 @@ export class Orchestrator {
     console.log(chalk.dim(`  ↳ 已加载自定义角色: ${def.displayName} (${def.name})`));
   }
 
+  private persistState(): void {
+    this.state.updatedAt = new Date().toISOString();
+    try {
+      saveWorkflowSnapshot(this.config.project.path, this.state);
+    } catch {
+      // ignore snapshot errors
+    }
+  }
+
+  private markFailed(error: unknown): void {
+    this.state.stage = WorkflowStage.FAILED;
+    this.state.lastError = error instanceof Error ? error.message : String(error);
+    this.persistState();
+  }
+
   async start(requirement: string): Promise<void> {
     console.log(chalk.cyan('\n🚀 全栈智能体启动\n'));
     console.log(chalk.dim(`项目: ${this.config.project.name}`));
@@ -102,67 +120,117 @@ export class Orchestrator {
 
     if (this.state.stage === WorkflowStage.COMPLETE) {
       console.log(chalk.green('\n✅ 任务交付完成\n'));
+      console.log(
+        chalk.dim('产物位于 .fe-agent/artifacts/；可用 fe-agent apply 将代码块写入项目文件。\n')
+      );
+    } else if (this.state.stage === WorkflowStage.FAILED) {
+      console.log(chalk.red(`\n❌ 工作流失败: ${this.state.lastError || '未知错误'}\n`));
     }
+
+    this.persistState();
   }
 
   private async processMessage(message: AgentMessage): Promise<void> {
     this.state.history.push(message);
+    this.persistState();
 
     if (message.metadata?.workflowComplete) {
       this.state.stage = WorkflowStage.COMPLETE;
       this.displayAgentOutput(message);
+      this.persistState();
       return;
     }
 
     const targetAgent = this.agents.get(String(message.to));
     if (!targetAgent) {
       console.error(chalk.red(`未知角色: ${message.to}`));
+      this.markFailed(new Error(`未知角色: ${message.to}`));
       return;
     }
 
     if (message.metadata?.needsUserDecision) {
       const answer = await this.askUser(message.content);
-      if (answer) {
-        const userMessage: AgentMessage = {
-          id: `msg_user_${Date.now()}`,
+      if (answer === null) {
+        // skip：按「保持现状并继续」处理，降级为 LOW 通过决策
+        console.log(chalk.yellow('已跳过用户确认，按「暂不处理/继续」恢复流程'));
+        const skipMessage: AgentMessage = {
+          id: `msg_skip_${Date.now()}`,
           from: Role.MANAGER,
-          to: message.metadata?.reviewType ? Role.MANAGER : message.to,
-          type: MessageType.TASK,
-          content: `用户回复：${answer}\n原始问题：${message.content}`,
+          to: Role.MANAGER,
+          type: MessageType.REVIEW_FEEDBACK,
+          content: '用户跳过确认，按继续处理',
           timestamp: new Date(),
-          metadata: { resumeAfterUser: true },
-        };
-        if (message.metadata?.pendingGap) {
-          userMessage.to = Role.MANAGER;
-          userMessage.type = MessageType.QUESTION;
-          userMessage.metadata = {
+          metadata: {
             ...message.metadata,
             needsUserDecision: false,
-            userAnswer: answer,
-          };
-        } else if (message.type === MessageType.QUESTION || message.type === MessageType.REVIEW_FEEDBACK) {
-          userMessage.to = Role.MANAGER;
-          userMessage.type = MessageType.REVIEW_FEEDBACK;
-          userMessage.metadata = {
-            ...message.metadata,
-            needsUserDecision: false,
-            userAnswer: answer,
+            userAnswer: 'skip',
             highestLevel: IssueLevel.LOW,
+            reviewPassed: true,
             feedbacks: [
               {
-                id: `fb_user_${Date.now()}`,
+                id: `fb_skip_${Date.now()}`,
                 reviewerRole: Role.REVIEWER,
                 targetRole: Role.MANAGER,
                 level: IssueLevel.LOW,
-                content: `用户决定：${answer}`,
-                suggestion: answer,
+                content: '用户跳过',
+                suggestion: '继续',
                 timestamp: new Date(),
               },
             ],
+          },
+        };
+        if (message.metadata?.pendingGap) {
+          skipMessage.type = MessageType.QUESTION;
+          skipMessage.metadata = {
+            ...message.metadata,
+            needsUserDecision: false,
+            userAnswer: 'no',
           };
         }
-        await this.processMessage(userMessage);
+        await this.processMessage(skipMessage);
+        return;
       }
+
+      const userMessage: AgentMessage = {
+        id: `msg_user_${Date.now()}`,
+        from: Role.MANAGER,
+        to: message.metadata?.reviewType ? Role.MANAGER : message.to,
+        type: MessageType.TASK,
+        content: `用户回复：${answer}\n原始问题：${message.content}`,
+        timestamp: new Date(),
+        metadata: { resumeAfterUser: true },
+      };
+      if (message.metadata?.pendingGap) {
+        userMessage.to = Role.MANAGER;
+        userMessage.type = MessageType.QUESTION;
+        userMessage.metadata = {
+          ...message.metadata,
+          needsUserDecision: false,
+          userAnswer: answer,
+        };
+      } else if (message.type === MessageType.QUESTION || message.type === MessageType.REVIEW_FEEDBACK) {
+        userMessage.to = Role.MANAGER;
+        userMessage.type = MessageType.REVIEW_FEEDBACK;
+        userMessage.metadata = {
+          ...message.metadata,
+          needsUserDecision: false,
+          userAnswer: answer,
+          highestLevel: IssueLevel.LOW,
+          reviewPassed: true,
+          feedbacks: [
+            {
+              id: `fb_user_${Date.now()}`,
+              reviewerRole: Role.REVIEWER,
+              targetRole: Role.MANAGER,
+              level: IssueLevel.LOW,
+              content: `用户决定：${answer}`,
+              suggestion: answer,
+              timestamp: new Date(),
+            },
+          ],
+        };
+      }
+      await this.processMessage(userMessage);
       return;
     }
 
@@ -184,6 +252,7 @@ export class Orchestrator {
     } catch (error) {
       spinner.fail(`${roleName} 处理失败`);
       console.error(chalk.red(`错误: ${error instanceof Error ? error.message : String(error)}`));
+      this.markFailed(error);
     }
   }
 
@@ -191,7 +260,12 @@ export class Orchestrator {
   private async dispatchResponses(responses: AgentMessage[]): Promise<void> {
     let i = 0;
     while (i < responses.length) {
-      if (this.state.stage === WorkflowStage.COMPLETE) return;
+      if (
+        this.state.stage === WorkflowStage.COMPLETE ||
+        this.state.stage === WorkflowStage.FAILED
+      ) {
+        return;
+      }
 
       const current = responses[i];
       const groupId = current.metadata?.parallelGroup as string | undefined;
@@ -225,37 +299,70 @@ export class Orchestrator {
       messages.map((m) => getRoleDisplayName(m.to)).join(' + ');
     const spinner = ora(`并行执行：${label}`).start();
 
-    try {
-      const settled = await Promise.all(
-        messages.map(async (msg) => {
-          this.state.history.push(msg);
-          this.updateWorkflowState(msg);
+    // 历史只在入口记录一次，避免双重 push
+    for (const msg of messages) {
+      this.updateWorkflowState(msg);
+    }
 
-          const agent = this.agents.get(String(msg.to));
-          if (!agent) {
-            throw new Error(`未知角色: ${msg.to}`);
-          }
+    const settled = await Promise.allSettled(
+      messages.map(async (msg) => {
+        this.state.history.push(msg);
 
-          const roleName = getRoleDisplayName(msg.to);
-          const outs = await agent.processMessage(msg);
-          return { msg, roleName, outs };
-        })
-      );
+        const agent = this.agents.get(String(msg.to));
+        if (!agent) {
+          throw new Error(`未知角色: ${msg.to}`);
+        }
 
+        const roleName = getRoleDisplayName(msg.to);
+        const outs = await agent.processMessage(msg);
+        return { msg, roleName, outs };
+      })
+    );
+
+    const successes: Array<{ msg: AgentMessage; roleName: string; outs: AgentMessage[] }> = [];
+    const failures: string[] = [];
+
+    for (let idx = 0; idx < settled.length; idx++) {
+      const result = settled[idx];
+      const roleLabel = getRoleDisplayName(messages[idx].to);
+      if (result.status === 'fulfilled') {
+        successes.push(result.value);
+        console.log(chalk.dim(`\n── ${roleLabel} 已完成 ──`));
+      } else {
+        const errMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        failures.push(`${roleLabel}: ${errMsg}`);
+        console.error(chalk.red(`\n── ${roleLabel} 失败: ${errMsg} ──`));
+      }
+    }
+
+    if (failures.length > 0 && successes.length === 0) {
+      spinner.fail(`并行失败：${label}`);
+      this.markFailed(new Error(failures.join('; ')));
+      return;
+    }
+
+    if (failures.length > 0) {
+      spinner.warn(`并行部分完成：${label}（失败 ${failures.length}）`);
+    } else {
       spinner.succeed(`并行完成：${label}`);
+    }
 
-      for (const item of settled) {
-        console.log(chalk.dim(`\n── ${getRoleDisplayName(item.msg.to)} 已完成 ──`));
-        for (const out of item.outs) {
-          this.displayAgentOutput(out);
-          this.updateWorkflowState(out);
-          await this.processMessage(out);
-          if (this.state.stage === WorkflowStage.COMPLETE) return;
+    for (const item of successes) {
+      for (const out of item.outs) {
+        this.displayAgentOutput(out);
+        this.updateWorkflowState(out);
+        await this.processMessage(out);
+        if (
+          this.state.stage === WorkflowStage.COMPLETE ||
+          this.state.stage === WorkflowStage.FAILED
+        ) {
+          return;
         }
       }
-    } catch (error) {
-      spinner.fail(`并行失败：${label}`);
-      console.error(chalk.red(`错误: ${error instanceof Error ? error.message : String(error)}`));
+    }
+
+    if (failures.length > 0) {
+      this.markFailed(new Error(`并行组部分失败: ${failures.join('; ')}`));
     }
   }
 
@@ -336,6 +443,7 @@ export class Orchestrator {
 
     const complexityHint = this.state.complexity ? ` | 分级=${this.state.complexity}` : '';
     console.log(chalk.dim(`\n📍 当前阶段: ${this.getStageLabel(this.state.stage)}${complexityHint}`));
+    this.persistState();
   }
 
   private getStageLabel(stage: WorkflowStage): string {
@@ -353,6 +461,7 @@ export class Orchestrator {
       [WorkflowStage.REVIEW_FRONTEND]: '审查前端',
       [WorkflowStage.CUSTOM_ROLE]: '自定义角色执行',
       [WorkflowStage.COMPLETE]: '完成',
+      [WorkflowStage.FAILED]: '失败',
     };
     return labels[stage];
   }

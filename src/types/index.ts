@@ -81,6 +81,7 @@ export enum WorkflowStage {
   REVIEW_FRONTEND = 'review_frontend',
   CUSTOM_ROLE = 'custom_role',
   COMPLETE = 'complete',
+  FAILED = 'failed',
 }
 
 export type ReviewType = 'requirement' | 'api_doc' | 'code' | 'test' | 'code_and_test';
@@ -107,6 +108,8 @@ export interface ReviewFeedback {
   content: string;
   suggestion: string;
   timestamp: Date;
+  reviewType?: ReviewType;
+  scope?: WorkScope;
 }
 
 export interface LogEntry {
@@ -134,6 +137,12 @@ export interface ProjectConfig {
     model: string;
     temperature: number;
     maxTokens: number;
+    /** 请求超时 ms（默认 120000） */
+    timeoutMs?: number;
+    /** 可重试错误的最大重试次数（默认 3） */
+    maxRetries?: number;
+    /** 代码类任务覆盖 maxTokens（默认 8192） */
+    codeMaxTokens?: number;
   };
   project: {
     name: string;
@@ -152,6 +161,8 @@ export interface ProjectConfig {
     mergeCodeTestReview?: boolean;
     /** 任务分级：auto 规则判断，或强制 simple/standard/full（默认 auto） */
     taskComplexity?: TaskComplexity | 'auto';
+    /** 知识库每角色最大条目（默认 200） */
+    maxKnowledgeEntries?: number;
   };
 }
 
@@ -162,4 +173,6 @@ export interface WorkflowState {
   history: AgentMessage[];
   skipBackend?: boolean;
   complexity?: TaskComplexity;
+  lastError?: string;
+  updatedAt?: string;
 }

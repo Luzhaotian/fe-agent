@@ -65,11 +65,13 @@ ${CODE_OUTPUT_HINT}
 
     for (const dir of componentDirs) {
       if (!fs.existsSync(dir)) continue;
-      for (const file of listFiles(dir, /\.(tsx|jsx|vue|svelte)$/)) {
-        const content = readFile(file);
-        if (!content) continue;
+      for (const file of listFiles(dir, /\.(tsx|jsx|vue|svelte)$/).slice(0, 60)) {
+        // 只读前 80 行提取导出名，避免全文入 prompt
+        const raw = readFile(file);
+        if (!raw) continue;
+        const head = raw.split('\n').slice(0, 80).join('\n');
         const relativePath = path.relative(projectPath, file);
-        const nameMatch = content.match(
+        const nameMatch = head.match(
           /(?:export\s+(?:default\s+)?(?:function|const)\s+(\w+)|defineComponent\(\s*\{\s*name:\s*['"](\w+)['"])/
         );
         const name = nameMatch?.[1] || nameMatch?.[2] || path.basename(file, path.extname(file));
@@ -95,7 +97,8 @@ ${CODE_OUTPUT_HINT}
 ## 编码规范
 ## 通用组件使用
 ## 页面开发模板`,
-          `请根据以下项目结构生成 skills 文档：\n\n${this.projectStructure}\n\n已有组件：\n${this.existingComponents}`
+          `请根据以下项目结构生成 skills 文档：\n\n${this.projectStructure}\n\n已有组件：\n${this.existingComponents}`,
+          { skipKnowledge: true }
         )
     );
     if (created) {
@@ -111,11 +114,25 @@ ${CODE_OUTPUT_HINT}
     this.log('develop_start', '开始开发代码');
     this.analyzeProject();
     const skillsContent = await this.ensureSkills();
-    const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
     const useArtifacts = Boolean(message.metadata?.useArtifacts);
+    const apiDoc = useArtifacts
+      ? this.artifacts.readApiDoc() || ''
+      : (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
     const requirement = useArtifacts
       ? this.artifacts.readRequirement() || message.content
       : message.content;
+
+    const docSection = useArtifacts
+      ? `## 产物（请按路径理解）
+- 需求：.fe-agent/artifacts/requirement.md（约 ${(requirement || '').length} 字）
+- 接口：.fe-agent/artifacts/api-doc.md（约 ${apiDoc.length} 字）
+- 需求摘要：${(requirement || '').slice(0, 800)}
+- 接口摘要：${apiDoc.slice(0, 1200)}`
+      : `## 接口文档
+${apiDoc || '无（纯前端或未提供）'}
+
+## 需求
+${requirement}`;
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
@@ -130,11 +147,10 @@ ${this.existingComponents || '未找到通用组件'}
 ## 项目 Skills
 ${skillsContent || '暂无'}
 
-## 接口文档
-${apiDoc || '无（纯前端或未提供）'}
+${docSection}
 
-## 需求
-${requirement}
+## 任务指示
+${message.content}
 
 ## 要求
 1. 严格按照项目已有的结构来写代码
@@ -142,10 +158,12 @@ ${requirement}
 3. 参考已有页面或功能的写法
 4. 对接接口文档中的契约
 5. 每个文件用代码块输出，标注文件路径
-6. 按照项目使用的语言和框架编写`
+6. 按照项目使用的语言和框架编写`,
+      { maxTokens: this.codeMaxTokens() }
     );
 
     this.log('develop_complete', '代码开发完成');
+    this.artifacts.saveCode('frontend', response);
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
@@ -158,13 +176,16 @@ ${requirement}
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
     this.log('handle_review', '处理审查反馈，整改代码');
     this.analyzeProject();
+    const prev = this.artifacts.readCode('frontend') || '';
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `审查员对代码提出了以下反馈，请据此整改：\n\n${message.content}\n\n## 项目结构\n${this.projectStructure}\n\n## 已有通用组件\n${this.existingComponents}\n\n请输出整改后的完整代码，每个文件用代码块输出。`
+      `审查员对代码提出了以下反馈，请据此整改：\n\n${message.content}\n\n## 当前交付物摘要\n${prev.slice(0, 3000)}\n\n## 项目结构\n${this.projectStructure}\n\n## 已有通用组件\n${this.existingComponents}\n\n请输出整改后的完整代码，每个文件用代码块输出。`,
+      { maxTokens: this.codeMaxTokens() }
     );
 
     this.log('code_revised', '代码整改完成');
+    this.artifacts.saveCode('frontend', response);
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {

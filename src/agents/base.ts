@@ -1,5 +1,5 @@
 import { ProjectConfig, RoleKey, AgentMessage, MessageType } from '../types';
-import { chat } from '../core/llm';
+import { chatDetailed } from '../core/llm';
 import { Logger, KnowledgeBase } from '../utils/file';
 
 export abstract class BaseAgent {
@@ -19,44 +19,49 @@ export abstract class BaseAgent {
     this.logger.log(this.role, action, content, metadata);
   }
 
-  protected async askLLM(systemPrompt: string, userMessage: string): Promise<string> {
-    const knowledge = this.getRelevantKnowledge(userMessage);
+  protected async askLLM(
+    systemPrompt: string,
+    userMessage: string,
+    options?: { maxTokens?: number; skipKnowledge?: boolean }
+  ): Promise<string> {
+    const knowledge = options?.skipKnowledge ? '' : this.getRelevantKnowledge(userMessage);
     const enhancedPrompt = knowledge
       ? `${systemPrompt}\n\n## 相关知识库\n${knowledge}`
       : systemPrompt;
 
     this.log('llm_call', `调用LLM，用户消息: ${userMessage.slice(0, 100)}...`);
-    const response = await chat(this.config, {
+    const result = await chatDetailed(this.config, {
       systemPrompt: enhancedPrompt,
       userMessage,
+      maxTokens: options?.maxTokens,
     });
-    this.log('llm_response', `LLM响应: ${response.slice(0, 100)}...`);
-    this.extractKnowledge(response);
-    return response;
+
+    if (result.truncated) {
+      this.log('llm_truncated', '响应因 max_tokens 被截断，将追加续写提示标记');
+    }
+
+    let content = result.content;
+    if (result.truncated) {
+      content += '\n\n[OUTPUT_TRUNCATED] 输出可能不完整，请在后续整改中补全被截断的文件。';
+    }
+
+    if (result.usage?.totalTokens) {
+      this.log('llm_usage', `tokens=${result.usage.totalTokens}`, result.usage as Record<string, unknown>);
+    }
+
+    this.log('llm_response', `LLM响应: ${content.slice(0, 100)}...`);
+    this.extractKnowledge(content);
+    return content;
+  }
+
+  protected codeMaxTokens(): number {
+    return this.config.llm.codeMaxTokens ?? Math.max(this.config.llm.maxTokens, 8192);
   }
 
   protected getRelevantKnowledge(query: string): string {
-    const entries = this.knowledge.getEntries(this.role);
+    const entries = this.knowledge.searchEntries(this.role, query, 3);
     if (entries.length === 0) return '';
-
-    const queryTokens = new Set(
-      query
-        .toLowerCase()
-        .split(/[\s，。、；：""''（）()\[\]{}]+/)
-        .filter((t) => t.length >= 2)
-    );
-
-    const relevant = entries
-      .filter((e) => {
-        if (query.includes(e.category)) return true;
-        const contentTokens = e.content.toLowerCase().split(/[\s，。、]+/);
-        return contentTokens.some((t) => t.length >= 2 && queryTokens.has(t));
-      })
-      .slice(0, 3);
-
-    if (relevant.length === 0) return '';
-
-    return relevant.map((e) => `- [${e.category}] ${e.content}`).join('\n');
+    return entries.map((e) => `- [${e.category}] ${e.content}`).join('\n');
   }
 
   protected extractKnowledge(content: string): void {
@@ -71,7 +76,10 @@ export abstract class BaseAgent {
     for (const pattern of patterns) {
       let match;
       while ((match = pattern.exec(content)) !== null) {
-        this.knowledge.addEntry(this.role, 'extracted', match[1].trim(), 'auto_extract');
+        const text = match[1].trim().slice(0, 500);
+        if (text.length >= 4) {
+          this.knowledge.addEntry(this.role, 'extracted', text, 'auto_extract');
+        }
       }
     }
   }

@@ -10,6 +10,10 @@
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare": "husky",
+    "commitlint": "commitlint --edit",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -32,10 +36,14 @@
     "ora": "^5.4.1"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
     "@types/inquirer": "^9.0.7",
     "@types/node": "^22.9.0",
+    "husky": "^9.1.7",
     "ts-node": "^10.9.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
   },
   "engines": {
     "node": ">=18.0.0"

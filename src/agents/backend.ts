@@ -85,7 +85,8 @@ ${CODE_OUTPUT_HINT}
 ## 编码规范
 ## 模块复用约定
 ## API 实现模板`,
-          `项目结构：\n${this.projectStructure}\n\n已有模块：\n${this.existingModules || '未识别'}`
+          `项目结构：\n${this.projectStructure}\n\n已有模块：\n${this.existingModules || '未识别'}`,
+          { skipKnowledge: true }
         )
     );
     if (created) {
@@ -99,11 +100,26 @@ ${CODE_OUTPUT_HINT}
     this.log('develop_start', '开始后端开发');
     this.analyzeProject();
     const skills = await this.ensureSkills();
-    const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
     const useArtifacts = Boolean(message.metadata?.useArtifacts);
+    const apiDoc = useArtifacts
+      ? this.artifacts.readApiDoc() || ''
+      : (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
     const requirement = useArtifacts
       ? this.artifacts.readRequirement() || message.content
       : message.content;
+
+    // useArtifacts 时 apiDoc/requirement 已在磁盘，prompt 只给摘要+路径，避免重复塞全文
+    const docSection = useArtifacts
+      ? `## 产物（请按路径理解，勿重复粘贴）
+- 需求：.fe-agent/artifacts/requirement.md（约 ${(requirement || '').length} 字）
+- 接口：.fe-agent/artifacts/api-doc.md（约 ${apiDoc.length} 字）
+- 需求摘要：${(requirement || '').slice(0, 800)}
+- 接口摘要：${apiDoc.slice(0, 1200)}`
+      : `## 接口文档
+${apiDoc || '无'}
+
+## 需求与指示
+${requirement}`;
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
@@ -118,19 +134,20 @@ ${this.existingModules || '未找到'}
 ## 后端 Skills
 ${skills || '暂无'}
 
-## 接口文档
-${apiDoc || '无'}
+${docSection}
 
-## 需求与指示
-${requirement}
+## 任务指示
+${message.content}
 
 ## 要求
 1. 严格按接口文档实现
 2. 优先复用已有模块
-3. 每个文件用代码块输出并标注路径`
+3. 每个文件用代码块输出并标注路径`,
+      { maxTokens: this.codeMaxTokens() }
     );
 
     this.log('develop_complete', '后端开发完成');
+    this.artifacts.saveCode('backend', response);
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {
@@ -144,13 +161,16 @@ ${requirement}
     this.log('handle_review', '处理审查反馈，整改后端代码');
     this.analyzeProject();
     const apiDoc = this.artifacts.readApiDoc() || '';
+    const prev = this.artifacts.readCode('backend') || '';
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `审查员对后端代码提出了以下反馈，请据此整改：\n\n${message.content}\n\n## 接口文档\n${apiDoc}\n\n## 项目结构\n${this.projectStructure}\n\n请输出整改后的完整代码。`
+      `审查员对后端代码提出了以下反馈，请据此整改：\n\n${message.content}\n\n## 接口文档摘要\n${apiDoc.slice(0, 2000)}\n\n## 当前交付物摘要\n${prev.slice(0, 3000)}\n\n## 项目结构\n${this.projectStructure}\n\n请输出整改后的完整代码。`,
+      { maxTokens: this.codeMaxTokens() }
     );
 
     this.log('code_revised', '后端代码整改完成');
+    this.artifacts.saveCode('backend', response);
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, enrichResultMetadata(response, {

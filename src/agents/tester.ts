@@ -44,8 +44,10 @@ export class TesterAgent extends BaseAgent {
     const side = scope === 'backend' ? '后端' : '前端';
     this.log('write_testcase', `开始编写${side}测试用例`);
 
-    const apiDoc = (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
     const useArtifacts = Boolean(message.metadata?.useArtifacts);
+    const apiDoc = useArtifacts
+      ? this.artifacts.readApiDoc() || ''
+      : (message.metadata?.apiDoc as string) || this.artifacts.readApiDoc() || '';
     const requirement = useArtifacts
       ? this.artifacts.readRequirement() || message.content
       : message.content;
@@ -55,15 +57,26 @@ export class TesterAgent extends BaseAgent {
         ? '重点覆盖接口路径、入参校验、响应与错误码、鉴权与边界条件'
         : '重点覆盖页面交互、前后端联调调用、异常提示与边界条件';
 
+    const docSection = useArtifacts
+      ? `## 产物
+- 需求：.fe-agent/artifacts/requirement.md（约 ${(requirement || '').length} 字）
+- 接口：.fe-agent/artifacts/api-doc.md（约 ${apiDoc.length} 字）
+- 需求摘要：${(requirement || '').slice(0, 800)}
+- 接口摘要：${apiDoc.slice(0, 1200)}`
+      : `## 需求
+${requirement}
+
+## 接口文档
+${apiDoc || '无'}`;
+
     const response = await this.askLLM(
       this.getSystemPrompt(),
       `请根据以下内容编写完整的${side}测试用例：
 
-## 需求
-${requirement}
+${docSection}
 
-## 接口文档
-${apiDoc || '无'}
+## 任务指示
+${message.content}
 
 要求：
 1. 覆盖所有相关功能点
@@ -75,6 +88,9 @@ ${apiDoc || '无'}
     );
 
     this.log('testcase_written', `${side}测试用例编写完成`);
+    if (scope === 'backend' || scope === 'frontend') {
+      this.artifacts.saveTests(scope, response);
+    }
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
@@ -87,13 +103,18 @@ ${apiDoc || '无'}
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
     const scope = ((message.metadata?.scope as WorkScope) || 'frontend') as WorkScope;
     this.log('handle_review', '处理审查反馈，整改测试用例');
+    const prev =
+      scope === 'backend' || scope === 'frontend' ? this.artifacts.readTests(scope) || '' : '';
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `审查员对测试用例提出了以下反馈，请据此整改：\n\n${message.content}\n\n请输出整改后的完整测试用例。`
+      `审查员对测试用例提出了以下反馈，请据此整改：\n\n${message.content}\n\n## 当前用例摘要\n${prev.slice(0, 3000)}\n\n请输出整改后的完整测试用例。`
     );
 
     this.log('testcase_revised', '测试用例整改完成');
+    if (scope === 'backend' || scope === 'frontend') {
+      this.artifacts.saveTests(scope, response);
+    }
 
     return [
       this.createMessage(Role.MANAGER, MessageType.RESULT, response, {

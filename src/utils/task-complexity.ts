@@ -8,11 +8,11 @@ export interface ComplexityResult {
 }
 
 const FRONTEND_ONLY =
-  /页面|组件|样式|文案|UI|按钮|弹窗|表单样式|css|tsx|jsx|改一下文案|微调|排版|图标/;
+  /页面|组件|样式|文案|UI|按钮|弹窗|表单样式|css|tsx|jsx|改一下文案|微调|排版|图标|layout|spacing|copy|typo/i;
 const BACKEND_SIGNAL =
-  /接口|API|api|后端|服务端|数据库|鉴权|登录|注册|CRUD|增删改查|服务端|REST|GraphQL/;
+  /接口|API|api|后端|服务端|数据库|鉴权|登录|注册|CRUD|增删改查|REST|GraphQL|endpoint|auth|database|schema/i;
 const FULL_SIGNAL =
-  /迁移|部署|基建|重构|权限体系|多租户|微服务|数据清洗|多端|灰度|监控|基础设施|devops|k8s|kubernetes/;
+  /迁移|部署|基建|重构|权限体系|多租户|微服务|数据清洗|多端|灰度|监控|基础设施|devops|k8s|kubernetes|migration|infra|multi-tenant/i;
 
 /**
  * 规则分级（不调 LLM）。
@@ -33,16 +33,26 @@ export function classifyTaskComplexity(
   const trimmed = text.trim();
   const len = trimmed.length;
 
-  if (FULL_SIGNAL.test(trimmed) || len > 1500) {
+  // 超长需求走 full，但阈值提高到 2500，减少误伤
+  if (FULL_SIGNAL.test(trimmed) || len > 2500) {
     return {
       complexity: 'full',
-      reason: len > 1500 ? '需求较长，走完整关卡' : '命中复杂/基建关键词，走完整关卡',
+      reason: len > 2500 ? '需求较长，走完整关卡' : '命中复杂/基建关键词，走完整关卡',
       skipBackendHint: false,
     };
   }
 
-  const frontendOnly = FRONTEND_ONLY.test(trimmed) && !BACKEND_SIGNAL.test(trimmed);
-  const shortAndLight = len > 0 && len <= 280 && !BACKEND_SIGNAL.test(trimmed);
+  // 明确含后端信号时绝不走 simple
+  if (BACKEND_SIGNAL.test(trimmed)) {
+    return {
+      complexity: 'standard',
+      reason: '含后端/接口信号，走标准关卡（并行+合并审查）',
+      skipBackendHint: false,
+    };
+  }
+
+  const frontendOnly = FRONTEND_ONLY.test(trimmed);
+  const shortAndLight = len > 0 && len <= 280;
 
   if ((frontendOnly || shortAndLight) && len <= 400) {
     return {

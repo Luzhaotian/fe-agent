@@ -8,9 +8,10 @@ import chalk from 'chalk';
 import { initLLM } from './core/llm';
 import { Orchestrator } from './core/orchestrator';
 import { loadConfig, validateConfig, initConfig } from './utils/config';
-import { Logger, KnowledgeBase } from './utils/file';
-import { Role } from './types';
+import { Logger, KnowledgeBase, Artifacts, readWorkflowSnapshot } from './utils/file';
+import { Role, WorkflowStage } from './types';
 import { RoleRegistry } from './utils/role-registry';
+import { applyCodeBlocks } from './utils/code-blocks';
 
 const VERSION = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
@@ -23,12 +24,39 @@ program
   .description('全栈智能体 - 多角色协作的全栈开发 AI 助手')
   .version(VERSION);
 
+async function fetchUrlText(url: string): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'fe-agent/1.0' },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
+    if (/html/i.test(contentType) || /<html/i.test(text)) {
+      return text
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 20000);
+    }
+    return text.slice(0, 20000);
+  } catch {
+    return null;
+  }
+}
+
 program
   .command('start')
   .description('启动全栈智能体')
   .option('-r, --requirement <text>', '直接传入需求文本')
   .option('-f, --file <path>', '从文件读取需求')
-  .option('-u, --url <url>', '传入需求网址（无法抓取时请用户粘贴正文）')
+  .option('-u, --url <url>', '从网址抓取需求正文（失败时回退提示）')
   .action(async (options) => {
     const projectPath = process.cwd();
 
@@ -57,7 +85,15 @@ program
       }
       requirement = fs.readFileSync(filePath, 'utf-8');
     } else if (options.url) {
-      requirement = `请基于以下网址整理需求（无法抓取网页时请用户粘贴正文）：${options.url}`;
+      console.log(chalk.dim(`正在抓取: ${options.url}`));
+      const fetched = await fetchUrlText(options.url);
+      if (fetched && fetched.length > 40) {
+        requirement = `来源 URL: ${options.url}\n\n${fetched}`;
+        console.log(chalk.green(`已抓取约 ${fetched.length} 字`));
+      } else {
+        console.log(chalk.yellow('无法抓取网页正文，请粘贴需求或改用 -r/-f'));
+        requirement = `请基于以下网址整理需求（无法抓取网页时请用户粘贴正文）：${options.url}`;
+      }
     } else {
       const answers = await inquirer.prompt([
         {
@@ -70,8 +106,13 @@ program
       requirement = answers.requirement;
 
       const possiblePath = path.resolve(requirement);
-      if (fs.existsSync(possiblePath)) {
+      if (fs.existsSync(possiblePath) && fs.statSync(possiblePath).isFile()) {
         requirement = fs.readFileSync(possiblePath, 'utf-8');
+      } else if (/^https?:\/\//i.test(requirement.trim())) {
+        const fetched = await fetchUrlText(requirement.trim());
+        if (fetched && fetched.length > 40) {
+          requirement = `来源 URL: ${requirement.trim()}\n\n${fetched}`;
+        }
       }
     }
 
@@ -133,6 +174,13 @@ LLM_MODEL=${answers.model}
           project: {
             name: answers.projectName,
             path: projectPath,
+          },
+          workflow: {
+            skipManagerAnalysis: true,
+            useArtifactRefs: true,
+            parallelSideWork: true,
+            mergeCodeTestReview: true,
+            taskComplexity: 'auto',
           },
         },
         null,
@@ -247,7 +295,7 @@ program
 
 program
   .command('status')
-  .description('查看项目状态')
+  .description('查看项目状态与最近工作流快照')
   .action(() => {
     const projectPath = process.cwd();
     const agentDir = path.join(projectPath, '.fe-agent');
@@ -259,7 +307,7 @@ program
       return;
     }
 
-    const dirs = ['logs', 'knowledge', 'skills', 'artifacts', 'roles'];
+    const dirs = ['logs', 'knowledge', 'skills', 'artifacts', 'roles', 'state'];
     for (const dir of dirs) {
       const dirPath = path.join(agentDir, dir);
       if (fs.existsSync(dirPath)) {
@@ -270,10 +318,61 @@ program
       }
     }
 
+    const snapshot = readWorkflowSnapshot(projectPath);
+    if (snapshot) {
+      console.log(chalk.cyan('\n📍 最近工作流：'));
+      console.log(chalk.dim(`  阶段: ${snapshot.stage}`));
+      if (snapshot.complexity) console.log(chalk.dim(`  分级: ${snapshot.complexity}`));
+      if (snapshot.updatedAt) console.log(chalk.dim(`  更新: ${snapshot.updatedAt}`));
+      if (snapshot.lastError) console.log(chalk.red(`  错误: ${snapshot.lastError}`));
+      if (snapshot.stage === WorkflowStage.COMPLETE) {
+        console.log(chalk.green('  状态: 已完成'));
+      } else if (snapshot.stage === WorkflowStage.FAILED) {
+        console.log(chalk.red('  状态: 失败'));
+      } else {
+        console.log(chalk.yellow('  状态: 未完成（当前不支持自动续跑，可查看 artifacts/logs）'));
+      }
+    }
+
     if (fs.existsSync(path.join(projectPath, '.env'))) {
-      console.log(chalk.green('  配置: 已配置'));
+      console.log(chalk.green('\n  配置: 已配置'));
     } else {
-      console.log(chalk.yellow('  配置: 未配置'));
+      console.log(chalk.yellow('\n  配置: 未配置'));
+    }
+  });
+
+program
+  .command('apply')
+  .description('将 artifacts 中的代码块写入项目文件')
+  .option('-s, --scope <scope>', 'backend | frontend | all', 'all')
+  .option('--dry-run', '只预览不写入')
+  .action((options) => {
+    const projectPath = process.cwd();
+    const artifacts = new Artifacts(projectPath);
+    const scopes: Array<'backend' | 'frontend'> =
+      options.scope === 'backend'
+        ? ['backend']
+        : options.scope === 'frontend'
+          ? ['frontend']
+          : ['backend', 'frontend'];
+
+    let any = false;
+    for (const scope of scopes) {
+      const content = artifacts.readCode(scope);
+      if (!content) {
+        console.log(chalk.dim(`无 ${scope} 代码产物`));
+        continue;
+      }
+      any = true;
+      const result = applyCodeBlocks(projectPath, content, { dryRun: Boolean(options.dryRun) });
+      console.log(chalk.cyan(`\n${scope}${options.dryRun ? ' (dry-run)' : ''}:`));
+      result.written.forEach((f) => console.log(chalk.green(`  ✓ ${f}`)));
+      result.skipped.forEach((f) => console.log(chalk.dim(`  · skip ${f}`)));
+      result.errors.forEach((e) => console.log(chalk.red(`  ✗ ${e}`)));
+    }
+
+    if (!any) {
+      console.log(chalk.dim('\n未找到可应用的代码产物（.fe-agent/artifacts/*-code.md）\n'));
     }
   });
 

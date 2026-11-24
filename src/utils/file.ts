@@ -1,8 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Role, RoleKey, RoleName, LogEntry, KnowledgeEntry, getRoleDisplayName } from '../types';
+import { Role, RoleKey, LogEntry, KnowledgeEntry, getRoleDisplayName, WorkflowState } from '../types';
+import { saveDeliverableArtifact } from './code-blocks';
 
 const AGENT_DIR = '.fe-agent';
+const DEFAULT_MAX_KNOWLEDGE = 200;
 
 export function ensureDir(dirPath: string): void {
   if (!fs.existsSync(dirPath)) {
@@ -12,6 +14,10 @@ export function ensureDir(dirPath: string): void {
 
 function getAgentDir(projectPath: string): string {
   return path.join(projectPath, AGENT_DIR);
+}
+
+export function getFeAgentDir(projectPath: string): string {
+  return getAgentDir(projectPath);
 }
 
 // ============ 日志系统 ============
@@ -51,7 +57,6 @@ export class Logger {
 
     fs.appendFileSync(logFile, logLine + '\n', 'utf-8');
 
-    // 同时写入全局日志
     const globalLogFile = path.join(getAgentDir(this.projectPath), 'logs', 'global.log');
     fs.appendFileSync(globalLogFile, `[${getRoleDisplayName(role)}] ${logLine}\n`, 'utf-8');
   }
@@ -83,11 +88,32 @@ export class Logger {
 
 // ============ 知识库系统 ============
 
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[\s，。、；：""''（）()\[\]{}|/\\,.;:!?？！\n\r\t_-]+/)
+    .flatMap((t) => {
+      if (t.length < 2) return [];
+      // 中文按 2-gram 粗切，提升短句命中
+      if (/[\u4e00-\u9fff]/.test(t) && t.length > 4) {
+        const grams: string[] = [t];
+        for (let i = 0; i < t.length - 1; i++) grams.push(t.slice(i, i + 2));
+        return grams;
+      }
+      return [t];
+    });
+}
+
 export class KnowledgeBase {
   private projectPath: string;
+  private maxEntries: number;
+  /** 同步临界区标记：同 role 重入时先入队，避免并行回调交错丢写 */
+  private busy = new Set<string>();
+  private pending = new Map<string, Array<{ category: string; content: string; source: string }>>();
 
-  constructor(projectPath: string) {
+  constructor(projectPath: string, maxEntries = DEFAULT_MAX_KNOWLEDGE) {
     this.projectPath = projectPath;
+    this.maxEntries = maxEntries;
     ensureDir(path.join(getAgentDir(projectPath), 'knowledge'));
   }
 
@@ -102,17 +128,45 @@ export class KnowledgeBase {
   }
 
   addEntry(role: RoleKey, category: string, content: string, source: string): void {
-    const entry: KnowledgeEntry = {
+    const key = String(role);
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    if (this.busy.has(key)) {
+      const q = this.pending.get(key) || [];
+      q.push({ category, content: trimmed, source });
+      this.pending.set(key, q);
+      return;
+    }
+
+    this.busy.add(key);
+    try {
+      this.writeOne(role, category, trimmed, source);
+      const q = this.pending.get(key) || [];
+      while (q.length > 0) {
+        const next = q.shift()!;
+        this.writeOne(role, next.category, next.content, next.source);
+      }
+    } finally {
+      this.busy.delete(key);
+    }
+  }
+
+  private writeOne(role: RoleKey, category: string, content: string, source: string): void {
+    const entries = this.getEntries(role);
+    if (entries.some((e) => e.category === category && e.content === content)) return;
+
+    entries.push({
       id: `k_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       role,
       category,
       content,
       source,
       createdAt: new Date(),
-    };
-
-    const entries = this.getEntries(role);
-    entries.push(entry);
+    });
+    while (entries.length > this.maxEntries) {
+      entries.shift();
+    }
     this.saveEntries(role, entries);
   }
 
@@ -126,14 +180,27 @@ export class KnowledgeBase {
     }
   }
 
-  searchEntries(role: RoleKey, keyword: string): KnowledgeEntry[] {
+  searchEntries(role: RoleKey, keyword: string, limit = 5): KnowledgeEntry[] {
     const entries = this.getEntries(role);
-    return entries.filter(
-      (e) =>
-        e.content.includes(keyword) ||
-        e.category.includes(keyword) ||
-        e.source.includes(keyword)
-    );
+    if (!keyword.trim()) return entries.slice(-limit);
+
+    const queryTokens = new Set(tokenize(keyword));
+    const scored = entries
+      .map((e) => {
+        let score = 0;
+        if (e.content.includes(keyword) || e.category.includes(keyword) || e.source.includes(keyword)) {
+          score += 10;
+        }
+        const tokens = tokenize(`${e.category} ${e.content} ${e.source}`);
+        for (const t of tokens) {
+          if (queryTokens.has(t)) score += 1;
+        }
+        return { e, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scored.slice(0, limit).map((x) => x.e);
   }
 
   private saveEntries(role: RoleKey, entries: KnowledgeEntry[]): void {
@@ -214,5 +281,72 @@ export class Artifacts {
 
   readRequirement(): string | null {
     return readFile(this.getRequirementPath());
+  }
+
+  saveCode(scope: 'backend' | 'frontend', content: string): string {
+    const name = scope === 'backend' ? 'backend-code.md' : 'frontend-code.md';
+    const { artifactPath } = saveDeliverableArtifact(this.getArtifactsDir(), name, content);
+    return artifactPath;
+  }
+
+  readCode(scope: 'backend' | 'frontend'): string | null {
+    const name = scope === 'backend' ? 'backend-code.md' : 'frontend-code.md';
+    return readFile(path.join(this.getArtifactsDir(), name));
+  }
+
+  saveTests(scope: 'backend' | 'frontend', content: string): string {
+    const name = scope === 'backend' ? 'backend-tests.md' : 'frontend-tests.md';
+    writeFile(path.join(this.getArtifactsDir(), name), content);
+    return path.join(this.getArtifactsDir(), name);
+  }
+
+  readTests(scope: 'backend' | 'frontend'): string | null {
+    const name = scope === 'backend' ? 'backend-tests.md' : 'frontend-tests.md';
+    return readFile(path.join(this.getArtifactsDir(), name));
+  }
+
+  getRelativeArtifactPath(absolutePath: string): string {
+    return path.relative(this.projectPath, absolutePath);
+  }
+}
+
+// ============ 工作流快照 ============
+
+export function saveWorkflowSnapshot(projectPath: string, state: WorkflowState): void {
+  const dir = path.join(getAgentDir(projectPath), 'state');
+  ensureDir(dir);
+  const serializable = {
+    ...state,
+    updatedAt: new Date().toISOString(),
+    history: state.history.slice(-50).map((m) => ({
+      id: m.id,
+      from: m.from,
+      to: m.to,
+      type: m.type,
+      content: m.content.slice(0, 500),
+      timestamp: m.timestamp,
+      metadata: m.metadata
+        ? {
+            reviewType: m.metadata.reviewType,
+            scope: m.metadata.scope,
+            workflowComplete: m.metadata.workflowComplete,
+            complexity: m.metadata.complexity,
+            skipBackend: m.metadata.skipBackend,
+          }
+        : undefined,
+    })),
+    reviewFeedbacks: state.reviewFeedbacks.slice(-30),
+  };
+  writeFile(path.join(dir, 'workflow.json'), JSON.stringify(serializable, null, 2));
+}
+
+export function readWorkflowSnapshot(projectPath: string): WorkflowState | null {
+  const filePath = path.join(getAgentDir(projectPath), 'state', 'workflow.json');
+  const raw = readFile(filePath);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WorkflowState;
+  } catch {
+    return null;
   }
 }

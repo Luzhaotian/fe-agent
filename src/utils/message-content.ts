@@ -28,3 +28,52 @@ ${requirement || artifacts.readRequirement() || '（无）'}
 ## 接口文档
 ${apiDoc || artifacts.readApiDoc() || '（无）'}`;
 }
+
+/** 构建审查任务正文：优先引用已落盘的代码/用例产物。 */
+export function buildReviewTaskContent(
+  artifacts: Artifacts,
+  scope: 'backend' | 'frontend',
+  kind: 'code' | 'test' | 'code_and_test',
+  fallback: { code?: string; test?: string },
+  useArtifacts: boolean
+): string {
+  const side = scope === 'backend' ? '后端' : '前端';
+
+  if (useArtifacts) {
+    if (kind === 'code_and_test') {
+      const codePath = artifacts.saveCode(scope, fallback.code || '');
+      const testPath = artifacts.saveTests(scope, fallback.test || '');
+      return `请合并审查以下${side}代码与测试用例（一次给出结论）。
+
+产物路径：
+- 代码：${artifacts.getRelativeArtifactPath(codePath)}
+- 用例：${artifacts.getRelativeArtifactPath(testPath)}
+
+请阅读产物后输出审查报告；不要在回复中重复粘贴全文。`;
+    }
+
+    if (kind === 'code') {
+      const codePath = artifacts.saveCode(scope, fallback.code || '');
+      return `请审查以下${side}代码。
+
+产物路径：${artifacts.getRelativeArtifactPath(codePath)}
+
+请阅读产物后输出审查报告。`;
+    }
+
+    const testPath = artifacts.saveTests(scope, fallback.test || '');
+    return `请审查以下${side}测试用例。
+
+产物路径：${artifacts.getRelativeArtifactPath(testPath)}
+
+请阅读产物后输出审查报告。`;
+  }
+
+  if (kind === 'code_and_test') {
+    return `请合并审查以下${side}代码与测试用例：\n\n## 代码\n${fallback.code || ''}\n\n## 测试用例\n${fallback.test || ''}`;
+  }
+  if (kind === 'code') {
+    return `请审查以下代码：\n${fallback.code || ''}`;
+  }
+  return `请审查以下测试用例：\n${fallback.test || ''}`;
+}
