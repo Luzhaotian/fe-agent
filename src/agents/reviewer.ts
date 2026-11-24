@@ -19,8 +19,8 @@ export class ReviewerAgent extends BaseAgent {
 - 需求：检查前后端能力与数据实体是否完整
 - 接口文档（轻量）：只查路径、请求参数、响应、错误码
 - 代码：是否符合项目习惯、是否按需求与接口文档实现
-- 用例：是否可执行、是否与需求/接口一致
-- 代码+用例合并审查：同时覆盖实现与用例，问题需标注目标角色（后端架构/前端架构/测试员）
+- 用例：须为可执行的 Playwright（.spec.ts）；检查能否运行、是否与需求/接口一致、选择器与断言是否合理
+- 代码+用例合并审查：同时覆盖实现与 Playwright 用例，问题需标注目标角色（后端架构/前端架构/测试员）
 
 请优先输出一个 JSON 代码块（不要其它包裹说明），格式：
 \`\`\`json
@@ -162,22 +162,26 @@ ${content}
   }
 
   private getTestReviewPrompt(content: string, scope?: WorkScope): string {
-    const side = scope === 'backend' ? '后端' : '前端';
-    return `请审查以下${side}测试用例：
+    const side = scope === 'backend' ? '后端 API（Playwright request）' : '前端 E2E（Playwright page）';
+    return `请审查以下${side}测试：
 
 ${content}
 
-审查要点：是否可执行、与需求/接口一致、边界是否覆盖。
+审查要点：
+1. 是否为可执行的 @playwright/test 代码（非纯 Markdown 步骤）
+2. 是否与需求/接口文档一致
+3. 断言与边界是否覆盖；选择器是否稳健
 请按系统要求输出 JSON 审查报告。`;
   }
 
   private getMergedReviewPrompt(content: string, scope?: WorkScope): string {
     const side = scope === 'backend' ? '后端' : '前端';
     const codeRole = scope === 'backend' ? '后端架构' : '前端架构';
-    return `请合并审查以下${side}代码与测试用例（一次给出结论）：
+    return `请合并审查以下${side}代码与 Playwright 测试（一次给出结论）：
 
 ${content}
 
+【测试】须为可执行 Playwright；检查与需求/接口一致性、断言与选择器。
 问题请标注目标角色（${codeRole} 或 测试员）。
 请按系统要求输出 JSON 审查报告；若均无明显问题，passed=true。`;
   }

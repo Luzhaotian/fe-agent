@@ -10,10 +10,11 @@
 - **动态扩角色**：执行中若现有角色无法处理，自动匹配或创建自定义角色（落盘 `.fe-agent/roles/`）
 - **全栈覆盖**：同一链路打通接口文档 → 后端 → 前端，而不是只写页面
 - **后端优先**：先出接口文档并轻量审查，再写后端，最后写前端
-- **架构角色**：处理非业务基建改动，并产出接口文档
+- **Playwright 用例**：测试员产出可执行用例——后端用 `request`，前端用 `page` E2E
+- **产物落盘 / apply**：代码与测试写入 `.fe-agent/artifacts/`，可用 `fe-agent apply` 落到项目
 - **项目感知**：按项目结构与 skills 开发，优先复用已有模块/组件
 - **知识库积累**：按角色落盘日志与知识
-- **分级问题处理**：低/中/高，高级交用户决策
+- **分级问题处理**：低/中/高，高级交用户决策；审查解析失败默认不通过
 
 ## 角色说明
 
@@ -24,8 +25,8 @@
 | **架构** | 非业务改动；产出接口文档；开发前评估 + 过程中按需介入 |
 | **后端架构** | 按接口文档实现后端，生成 backend skills |
 | **前端架构** | 按接口文档 + 需求实现前端 |
-| **测试员** | 先后端用例，再前端用例 |
-| **审查员** | 审需求；轻量审接口文档；审后端/前端代码与测试 |
+| **测试员** | 产出可执行 Playwright：先后端 API（`request`），再前端 E2E（`page`） |
+| **审查员** | 审需求；轻量审接口文档；审后端/前端代码与 Playwright 测试 |
 
 ## 安装
 
@@ -59,6 +60,10 @@ fe-agent init
 LLM_API_KEY=your-api-key
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4o
+# 可选
+# LLM_CODE_MAX_TOKENS=8192
+# LLM_TIMEOUT_MS=120000
+# LLM_MAX_RETRIES=3
 ```
 
 ### 启动
@@ -67,19 +72,38 @@ LLM_MODEL=gpt-4o
 fe-agent start
 fe-agent start -r "开发用户登录：含登录接口与登录页"
 fe-agent start -f requirements.md
-fe-agent start -u https://example.com/requirements
+fe-agent start -u https://example.com/requirements   # 尝试抓取网页正文
 ```
 
-### 日志 / 知识库 / 状态
+### 产物写入项目
+
+交付完成后，将 artifacts 中的代码块落到工作区：
+
+```bash
+fe-agent apply              # 代码 + Playwright 测试
+fe-agent apply -k code      # 仅业务代码
+fe-agent apply -k test      # 仅测试
+fe-agent apply -s frontend  # 仅前端侧
+fe-agent apply --dry-run    # 只预览路径
+```
+
+目标项目需自行安装 Playwright 后运行，例如：
+
+```bash
+npm i -D @playwright/test
+npx playwright install
+npx playwright test
+```
+
+### 日志 / 知识库 / 状态 / 角色
 
 ```bash
 fe-agent logs
 fe-agent logs -r backend
-fe-agent logs -r architect_sys
 fe-agent knowledge
 fe-agent knowledge -r architect
 fe-agent roles
-fe-agent status
+fe-agent status             # 含最近工作流快照（阶段 / 错误）
 ```
 
 ## 工作流程
@@ -104,20 +128,20 @@ flowchart TD
 
   M5 -->|无需后端 SKIP| M7
   M5 -->|需要后端| B[后端架构：实现]
-  M5 -->|同批| TB[测试员：后端用例]
+  M5 -->|同批| TB[测试员：Playwright API]
   B -->|RESULT| M6[项目经理]
   TB -->|RESULT| M6
-  M6 -->|送审| R3[审查员：审后端代码/用例]
+  M6 -->|送审| R3[审查员：审后端代码/测试]
   R3 -->|有问题| M6
   M6 -->|整改| B
   M6 -->|整改| TB
   R3 -->|后端关卡通过| M7[项目经理]
 
   M7 --> F[前端架构：按接口文档实现]
-  M7 -->|同批| TF[测试员：前端用例]
+  M7 -->|同批| TF[测试员：Playwright E2E]
   F -->|RESULT| M8[项目经理]
   TF -->|RESULT| M8
-  M8 -->|送审| R4[审查员：审前端代码/用例]
+  M8 -->|送审| R4[审查员：审前端代码/测试]
   R4 -->|有问题| M8
   M8 -->|整改| F
   M8 -->|整改| TF
@@ -133,13 +157,24 @@ flowchart TD
 1. 消息驱动：角色之间不直接调用，一律经项目经理分发。
 2. **任务分级**：开局按规则分为 `simple` / `standard` / `full`（可配置强制）。
 3. 关卡制（standard/full）：接口文档过审后才进后端；后端过审后才进前端。
-4. **同批并行**：同一关卡内「开发」与「写用例」默认并行执行。
-5. **合并审查**（simple/standard）：同侧代码+用例一次审完；full 仍分审。
-6. **快路径（simple）**：产品整理 → 前端开发∥用例 → 一次合并审查 → 完成（跳过需求审、架构、接口审、后端）。
+4. **同批并行**：同一关卡内「开发」与「写 Playwright」默认并行执行。
+5. **合并审查**（simple/standard）：同侧代码+测试一次审完；full 仍分审。
+6. **快路径（simple）**：产品整理 → 前端开发∥E2E → 一次合并审查 → 完成（跳过需求审、架构、接口审、后端）。
 7. 捷径：架构标注无需后端时，跳过后端关卡直达前端。
 8. 旁路：基建/目录/依赖等非业务改动，随时转给架构，处理完再回到原阶段。
-9. 高级问题：审查或提问为「高」时打断，询问用户后再继续。
+9. 高级问题：审查或提问为「高」时打断，询问用户后再继续；`skip` 按继续策略恢复。
 10. 动态角色：`[NEEDS_NEW_ROLE]` 或规则匹配缺口时自动创建/委派；敏感能力需用户确认。
+
+## Playwright 用例约定
+
+测试员输出可运行的 `@playwright/test` 文件（代码块 `ts:路径`），不再写 Markdown 步骤清单。
+
+| scope | 建议路径 | 方式 |
+|-------|----------|------|
+| 后端 | `e2e/api/*.spec.ts` | `request` 测路径/入参/响应/错误码 |
+| 前端 | `e2e/*.spec.ts` | `page` E2E；优先 role/label/testid |
+
+审查员按「是否可执行、是否与需求/接口一致」审查测试。落地后用 `fe-agent apply -k test` 写入项目。
 
 ## 动态角色
 
@@ -165,10 +200,11 @@ flowchart TD
 |--------|------|
 | 任务分级快路径 | `simple` 跳过需求审/架构/接口审/后端 |
 | 同批并行 | 开发与测试并行（`parallelSideWork`） |
-| 合并审查 | 同侧代码+用例一次审（`mergeCodeTestReview`；`full` 自动关闭） |
+| 合并审查 | 同侧代码+测试一次审（`mergeCodeTestReview`；`full` 自动关闭） |
 | 跳过经理开局分析 | 默认不再为分发多调一次 LLM |
 | 产物引用 | 开发/测试引用 artifacts，少重复粘贴全文 |
-| 知识库检索 | 按词匹配，避免无效知识塞进 prompt |
+| LLM 韧性 | 空响应失败、可配置重试/超时；代码任务可用更大 `maxTokens` |
+| 知识库检索 | 词匹配 + 上限与去重，避免无效知识塞进 prompt |
 
 `fe-agent.config.json` 可配置：
 
@@ -179,7 +215,8 @@ flowchart TD
     "useArtifactRefs": true,
     "parallelSideWork": true,
     "mergeCodeTestReview": true,
-    "taskComplexity": "auto"
+    "taskComplexity": "auto",
+    "maxKnowledgeEntries": 200
   }
 }
 ```
@@ -190,16 +227,22 @@ flowchart TD
 
 ```
 .fe-agent/
-├── logs/            # 按角色日志（含 architect_sys / backend）
+├── logs/            # 按角色日志
 ├── knowledge/       # 按角色知识库
 ├── skills/
 │   ├── architect.md
 │   ├── backend.md
 │   └── architect_sys.md
 ├── roles/           # 运行时自动创建的自定义角色
+├── state/
+│   └── workflow.json    # 最近工作流快照
 └── artifacts/
-    ├── api-doc.md       # 当前任务接口文档
-    └── requirement.md   # 当前任务需求
+    ├── api-doc.md           # 接口文档
+    ├── requirement.md       # 需求
+    ├── backend-code.md      # 后端交付（含代码块）
+    ├── frontend-code.md     # 前端交付
+    ├── backend-tests.md     # Playwright API 用例原文
+    └── frontend-tests.md    # Playwright E2E 用例原文
 ```
 
 ## 配置
@@ -210,7 +253,10 @@ flowchart TD
 | `LLM_BASE_URL` | LLM API 地址 | `https://api.openai.com/v1` |
 | `LLM_MODEL` | 模型名称 | `gpt-4o` |
 | `LLM_TEMPERATURE` | 温度 | `0.7` |
-| `LLM_MAX_TOKENS` | 最大 token | `4096` |
+| `LLM_MAX_TOKENS` | 默认最大 token | `4096` |
+| `LLM_CODE_MAX_TOKENS` | 代码/测试生成 token | `8192` |
+| `LLM_TIMEOUT_MS` | 请求超时 | `120000` |
+| `LLM_MAX_RETRIES` | 可重试错误次数 | `3` |
 
 `fe-agent.config.json`：
 
@@ -227,11 +273,14 @@ flowchart TD
 ## 开发
 
 ```bash
-npm install
+npm install          # 会通过 husky 安装 commit-msg 钩子
 npm run dev start -r "需求"
 npm run build
+npm test             # vitest 单测
 npm start
 ```
+
+提交信息遵循 Conventional Commits（见 `.cursorrules`）：优先中文、可穿插英文，默认单行，由 commitlint 校验。
 
 ## License
 

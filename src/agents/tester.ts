@@ -1,6 +1,8 @@
 import { BaseAgent } from './base';
 import { ProjectConfig, Role, AgentMessage, MessageType, WorkScope } from '../types';
 import { Logger, KnowledgeBase, Artifacts } from '../utils/file';
+import { PLAYWRIGHT_TEST_HINT } from '../utils/constants';
+import { enrichResultMetadata } from '../utils/capability-gap';
 
 export class TesterAgent extends BaseAgent {
   private artifacts: Artifacts;
@@ -11,19 +13,15 @@ export class TesterAgent extends BaseAgent {
   }
 
   getSystemPrompt(): string {
-    return `你是测试员，按任务 scope 编写后端接口用例或前端交互用例，完成后交项目经理送审。
+    return `你是测试员，按任务 scope 编写可执行的 Playwright 测试，完成后交项目经理送审。
 
-测试用例格式：
-## 测试用例集
-### TC-001: [用例标题]
-- **优先级**: 高/中/低
-- **前置条件**:
-- **测试步骤**:
-- **预期结果**:
-- **实际结果**: [待填写]
-- **状态**: 待执行/通过/失败
+- 前端：页面交互 E2E（page / locator）
+- 后端：接口 API 测试（request fixture）
+- 禁止只写 Markdown「步骤/预期」文档用例；必须输出可运行的 .spec.ts 代码块
 
-请用中文回复。`;
+${PLAYWRIGHT_TEST_HINT}
+
+请用中文回复说明，代码与断言保持可执行。`;
   }
 
   async processMessage(message: AgentMessage): Promise<AgentMessage[]> {
@@ -41,8 +39,8 @@ export class TesterAgent extends BaseAgent {
 
   private async handleWriteTestCase(message: AgentMessage): Promise<AgentMessage[]> {
     const scope = ((message.metadata?.scope as WorkScope) || 'frontend') as WorkScope;
-    const side = scope === 'backend' ? '后端' : '前端';
-    this.log('write_testcase', `开始编写${side}测试用例`);
+    const side = scope === 'backend' ? '后端 API' : '前端 E2E';
+    this.log('write_testcase', `开始编写${side} Playwright 用例`);
 
     const useArtifacts = Boolean(message.metadata?.useArtifacts);
     const apiDoc = useArtifacts
@@ -54,8 +52,17 @@ export class TesterAgent extends BaseAgent {
 
     const focus =
       scope === 'backend'
-        ? '重点覆盖接口路径、入参校验、响应与错误码、鉴权与边界条件'
-        : '重点覆盖页面交互、前后端联调调用、异常提示与边界条件';
+        ? `使用 Playwright request 覆盖：
+- 接口路径、方法与接口文档一致
+- 入参校验、成功响应、错误码
+- 鉴权与边界（缺参、非法值、未授权）
+建议路径：e2e/api/*.spec.ts`
+        : `使用 Playwright page 覆盖：
+- 主流程交互与页面断言
+- 与接口联调相关的前端表现
+- 异常提示与边界
+建议路径：e2e/*.spec.ts
+选择器优先 getByRole / getByLabel / getByTestId`;
 
     const docSection = useArtifacts
       ? `## 产物
@@ -71,7 +78,7 @@ ${apiDoc || '无'}`;
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `请根据以下内容编写完整的${side}测试用例：
+      `请根据以下内容编写完整的${side} Playwright 测试（可执行代码，不要 Markdown 步骤清单）：
 
 ${docSection}
 
@@ -79,48 +86,68 @@ ${docSection}
 ${message.content}
 
 要求：
-1. 覆盖所有相关功能点
-2. 包含正常流程和异常流程
-3. 考虑边界条件
-4. 每个用例有明确的预期结果
-5. 标注优先级
-6. ${focus}`
+1. 覆盖相关功能点（正常 + 异常/边界）
+2. 每个文件用 \`\`\`ts:路径 代码块输出
+3. import { test, expect } from '@playwright/test'
+4. ${focus}
+5. 文首可用简短中文说明用例意图；主体必须是可运行代码`,
+      { maxTokens: this.codeMaxTokens() }
     );
 
-    this.log('testcase_written', `${side}测试用例编写完成`);
+    this.log('testcase_written', `${side} Playwright 用例编写完成`);
     if (scope === 'backend' || scope === 'frontend') {
       this.artifacts.saveTests(scope, response);
     }
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
-        testCasesDelivered: true,
-        scope,
-      }),
+      this.createMessage(
+        Role.MANAGER,
+        MessageType.RESULT,
+        response,
+        enrichResultMetadata(response, {
+          testCasesDelivered: true,
+          testFramework: 'playwright',
+          scope,
+        })
+      ),
     ];
   }
 
   private async handleReviewFeedback(message: AgentMessage): Promise<AgentMessage[]> {
     const scope = ((message.metadata?.scope as WorkScope) || 'frontend') as WorkScope;
-    this.log('handle_review', '处理审查反馈，整改测试用例');
+    this.log('handle_review', '处理审查反馈，整改 Playwright 用例');
     const prev =
       scope === 'backend' || scope === 'frontend' ? this.artifacts.readTests(scope) || '' : '';
 
     const response = await this.askLLM(
       this.getSystemPrompt(),
-      `审查员对测试用例提出了以下反馈，请据此整改：\n\n${message.content}\n\n## 当前用例摘要\n${prev.slice(0, 3000)}\n\n请输出整改后的完整测试用例。`
+      `审查员对 Playwright 测试提出了以下反馈，请据此整改并输出完整可运行的 .spec.ts 代码块：
+
+${message.content}
+
+## 当前交付物摘要
+${prev.slice(0, 3000)}
+
+要求：保持 Playwright 风格；不要退回 Markdown 步骤清单。`,
+      { maxTokens: this.codeMaxTokens() }
     );
 
-    this.log('testcase_revised', '测试用例整改完成');
+    this.log('testcase_revised', 'Playwright 用例整改完成');
     if (scope === 'backend' || scope === 'frontend') {
       this.artifacts.saveTests(scope, response);
     }
 
     return [
-      this.createMessage(Role.MANAGER, MessageType.RESULT, response, {
-        testCasesRevised: true,
-        scope,
-      }),
+      this.createMessage(
+        Role.MANAGER,
+        MessageType.RESULT,
+        response,
+        enrichResultMetadata(response, {
+          testCasesRevised: true,
+          testFramework: 'playwright',
+          scope,
+        })
+      ),
     ];
   }
 }

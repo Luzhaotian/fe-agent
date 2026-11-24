@@ -343,8 +343,9 @@ program
 
 program
   .command('apply')
-  .description('将 artifacts 中的代码块写入项目文件')
+  .description('将 artifacts 中的代码/Playwright 测试代码块写入项目文件')
   .option('-s, --scope <scope>', 'backend | frontend | all', 'all')
+  .option('-k, --kind <kind>', 'code | test | all', 'all')
   .option('--dry-run', '只预览不写入')
   .action((options) => {
     const projectPath = process.cwd();
@@ -355,24 +356,37 @@ program
         : options.scope === 'frontend'
           ? ['frontend']
           : ['backend', 'frontend'];
+    const kinds: Array<'code' | 'test'> =
+      options.kind === 'code' ? ['code'] : options.kind === 'test' ? ['test'] : ['code', 'test'];
 
     let any = false;
     for (const scope of scopes) {
-      const content = artifacts.readCode(scope);
-      if (!content) {
-        console.log(chalk.dim(`无 ${scope} 代码产物`));
-        continue;
+      for (const kind of kinds) {
+        const content =
+          kind === 'code' ? artifacts.readCode(scope) : artifacts.readTests(scope);
+        if (!content) {
+          console.log(chalk.dim(`无 ${scope} ${kind === 'code' ? '代码' : '测试'}产物`));
+          continue;
+        }
+        any = true;
+        const result = applyCodeBlocks(projectPath, content, { dryRun: Boolean(options.dryRun) });
+        console.log(
+          chalk.cyan(
+            `\n${scope}/${kind}${options.dryRun ? ' (dry-run)' : ''}:`
+          )
+        );
+        result.written.forEach((f) => console.log(chalk.green(`  ✓ ${f}`)));
+        result.skipped.forEach((f) => console.log(chalk.dim(`  · skip ${f}`)));
+        result.errors.forEach((e) => console.log(chalk.red(`  ✗ ${e}`)));
       }
-      any = true;
-      const result = applyCodeBlocks(projectPath, content, { dryRun: Boolean(options.dryRun) });
-      console.log(chalk.cyan(`\n${scope}${options.dryRun ? ' (dry-run)' : ''}:`));
-      result.written.forEach((f) => console.log(chalk.green(`  ✓ ${f}`)));
-      result.skipped.forEach((f) => console.log(chalk.dim(`  · skip ${f}`)));
-      result.errors.forEach((e) => console.log(chalk.red(`  ✗ ${e}`)));
     }
 
     if (!any) {
-      console.log(chalk.dim('\n未找到可应用的代码产物（.fe-agent/artifacts/*-code.md）\n'));
+      console.log(
+        chalk.dim(
+          '\n未找到可应用产物（.fe-agent/artifacts/*-code.md 或 *-tests.md）\n'
+        )
+      );
     }
   });
 
