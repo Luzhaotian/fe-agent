@@ -34,7 +34,9 @@
 
 ### scope（可选）
 
-局部改动时优先：`agents`、`orchestrator`、`llm`、`cli`、`workflow`、`artifacts`、`config`、`deps`
+局部改动时优先：`agents`、`orchestrator`、`llm`、`cli`、`workflow`、`artifacts`、`config`、`deps`、`docs`、`test`、`readme`
+
+纯文档改动用 type=`docs`（可省略 scope），例如 `docs: 更新 README Playwright 说明`；不要写成 `feat(docs): ...`
 
 ### 示例
 
